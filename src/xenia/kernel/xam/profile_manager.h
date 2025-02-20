@@ -84,10 +84,12 @@ class ProfileManager {
   // bool CreateProfile(const X_XAMACCOUNTINFO* account_info);
   bool DeleteProfile(const uint64_t xuid);
 
-  bool MountProfile(const uint64_t xuid);
+  void ModifyGamertag(const uint64_t xuid, std::string gamertag);
+
+  bool MountProfile(const uint64_t xuid, std::string mount_path = "");
   bool DismountProfile(const uint64_t xuid);
 
-  void Login(const uint64_t xuid, const uint8_t user_index = -1,
+  void Login(const uint64_t xuid, const uint8_t user_index = XUserIndexAny,
              bool notify = true);
   void Logout(const uint8_t user_index, bool notify = true);
   void LoginMultiple(const std::map<uint8_t, uint64_t>& profiles);
@@ -101,9 +103,12 @@ class ProfileManager {
   UserProfile* GetProfile(const uint8_t user_index) const;
   uint8_t GetUserIndexAssignedToProfile(const uint64_t xuid) const;
 
-  std::map<uint64_t, X_XAMACCOUNTINFO>* GetProfiles() { return &accounts_; }
+  const std::map<uint64_t, X_XAMACCOUNTINFO>* GetAccounts() {
+    return &accounts_;
+  }
+  const X_XAMACCOUNTINFO* GetAccount(const uint64_t xuid);
 
-  uint32_t GetProfilesCount() const {
+  uint32_t GetAccountCount() const {
     return static_cast<uint32_t>(accounts_.size());
   }
   bool IsAnyProfileSignedIn() const { return !logged_profiles_.empty(); }
@@ -116,6 +121,7 @@ class ProfileManager {
  private:
   void UpdateConfig(const uint64_t xuid, const uint8_t slot);
   bool CreateAccount(const uint64_t xuid, const std::string gamertag);
+  bool UpdateAccount(const uint64_t xuid, X_XAMACCOUNTINFO* account);
 
   std::filesystem::path GetProfilePath(const uint64_t xuid) const;
   std::filesystem::path GetProfilePath(const std::string xuid) const;
