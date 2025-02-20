@@ -34,7 +34,7 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles(
   data_fragment_path += ".data";
   if (!std::filesystem::exists(data_fragment_path)) {
     XELOGE("STFS container is multi-file, but path {} does not exist.",
-           xe::path_to_utf8(data_fragment_path));
+           data_fragment_path);
     return Result::kFileMismatch;
   }
 
@@ -47,7 +47,8 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles(
 
   if (fragment_files.size() != header_->content_metadata.data_file_count) {
     XELOGE("SVOD expecting {} data fragments, but {} are present.",
-           header_->content_metadata.data_file_count, fragment_files.size());
+           header_->content_metadata.data_file_count.get(),
+           fragment_files.size());
     return Result::kFileMismatch;
   }
 
@@ -56,7 +57,7 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles(
     auto path = fragment.path / fragment.name;
     auto file = xe::filesystem::OpenFile(path, "rb");
     if (!file) {
-      XELOGI("Failed to map SVOD file {}.", xe::path_to_utf8(path));
+      XELOGI("Failed to map SVOD file {}.", path);
       CloseFiles();
       return Result::kReadError;
     }
@@ -99,7 +100,7 @@ XContentContainerDevice::Result SvodContainerDevice::Read() {
   const uint64_t root_creation_timestamp =
       decode_fat_timestamp(root_data.creation_date, root_data.creation_time);
 
-  auto root_entry = new XContentContainerEntry(this, nullptr, "", "", &files_);
+  auto root_entry = new XContentContainerEntry(this, nullptr, "", &files_);
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry->access_timestamp_ = root_creation_timestamp;
   root_entry->create_timestamp_ = root_creation_timestamp;

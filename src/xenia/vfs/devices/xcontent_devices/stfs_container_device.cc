@@ -53,7 +53,7 @@ XContentContainerDevice::Result StfsContainerDevice::LoadHostFiles(
 StfsContainerDevice::Result StfsContainerDevice::Read() {
   auto& file = files_.at(0);
 
-  auto root_entry = new XContentContainerEntry(this, nullptr, "", "", &files_);
+  auto root_entry = new XContentContainerEntry(this, nullptr, "", &files_);
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
 
@@ -158,8 +158,8 @@ std::unique_ptr<XContentContainerEntry> StfsContainerDevice::ReadEntry(
       XELOGW(
           "STFS file {} only found {} bytes for file, expected {} ({} "
           "bytes missing)",
-          name, dir_entry->length - remaining_size, dir_entry->length,
-          remaining_size);
+          name, dir_entry->length.get() - remaining_size,
+          dir_entry->length.get(), remaining_size);
       assert_always();
     }
 
