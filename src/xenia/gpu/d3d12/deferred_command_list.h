@@ -18,8 +18,8 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/math.h"
+#include "xenia/base/memory.h"
 #include "xenia/ui/d3d12/d3d12_api.h"
-
 namespace xe {
 namespace gpu {
 namespace d3d12 {
@@ -30,8 +30,13 @@ class D3D12CommandProcessor;
 
 class DeferredCommandList {
  public:
+  static constexpr size_t MAX_SIZEOF_COMMANDLIST = 65536 * 128;  // around 8 mb
+  /*
+        chrispy: upped from 1_MiB to 4_MiB, m:durandal hits frequent resizes in
+     large open maps
+  */
   DeferredCommandList(const D3D12CommandProcessor& command_processor,
-                      size_t initial_size_bytes = 1_MiB);
+                      size_t initial_size_bytes = MAX_SIZEOF_COMMANDLIST);
 
   void Reset();
   void Execute(ID3D12GraphicsCommandList* command_list,
@@ -562,7 +567,8 @@ class DeferredCommandList {
   const D3D12CommandProcessor& command_processor_;
 
   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
-  std::vector<uintmax_t> command_stream_;
+  // std::vector<uintmax_t> command_stream_;
+  FixedVMemVector<MAX_SIZEOF_COMMANDLIST> command_stream_;
 };
 
 }  // namespace d3d12

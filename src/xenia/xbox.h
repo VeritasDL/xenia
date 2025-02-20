@@ -10,9 +10,11 @@
 #ifndef XENIA_XBOX_H_
 #define XENIA_XBOX_H_
 
+#include <map>
 #include <string>
 
 #include "xenia/base/memory.h"
+#include "xenia/base/string.h"
 
 // TODO(benvanik): split this header, cleanup, etc.
 // clang-format off
@@ -61,7 +63,9 @@ typedef uint32_t X_STATUS;
 #define X_STATUS_OBJECT_NAME_COLLISION                  ((X_STATUS)0xC0000035L)
 #define X_STATUS_INVALID_PAGE_PROTECTION                ((X_STATUS)0xC0000045L)
 #define X_STATUS_MUTANT_NOT_OWNED                       ((X_STATUS)0xC0000046L)
+#define X_STATUS_THREAD_IS_TERMINATING                  ((X_STATUS)0xC000004BL)
 #define X_STATUS_PROCEDURE_NOT_FOUND                    ((X_STATUS)0xC000007AL)
+#define X_STATUS_INVALID_IMAGE_FORMAT                   ((X_STATUS)0xC000007BL)
 #define X_STATUS_INSUFFICIENT_RESOURCES                 ((X_STATUS)0xC000009AL)
 #define X_STATUS_MEMORY_NOT_ALLOCATED                   ((X_STATUS)0xC00000A0L)
 #define X_STATUS_FILE_IS_A_DIRECTORY                    ((X_STATUS)0xC00000BAL)
@@ -69,6 +73,7 @@ typedef uint32_t X_STATUS;
 #define X_STATUS_INVALID_PARAMETER_1                    ((X_STATUS)0xC00000EFL)
 #define X_STATUS_INVALID_PARAMETER_2                    ((X_STATUS)0xC00000F0L)
 #define X_STATUS_INVALID_PARAMETER_3                    ((X_STATUS)0xC00000F1L)
+#define X_STATUS_PROCESS_IS_TERMINATING                 ((X_STATUS)0xC000010AL)
 #define X_STATUS_DLL_NOT_FOUND                          ((X_STATUS)0xC0000135L)
 #define X_STATUS_ENTRYPOINT_NOT_FOUND                   ((X_STATUS)0xC0000139L)
 #define X_STATUS_MAPPED_ALIGNMENT                       ((X_STATUS)0xC0000220L)
@@ -88,7 +93,9 @@ typedef uint32_t X_RESULT;
 #define X_ERROR_PATH_NOT_FOUND                  X_RESULT_FROM_WIN32(0x00000003L)
 #define X_ERROR_ACCESS_DENIED                   X_RESULT_FROM_WIN32(0x00000005L)
 #define X_ERROR_INVALID_HANDLE                  X_RESULT_FROM_WIN32(0x00000006L)
+#define X_ERROR_NOT_ENOUGH_MEMORY               X_RESULT_FROM_WIN32(0x00000008L)
 #define X_ERROR_NO_MORE_FILES                   X_RESULT_FROM_WIN32(0x00000012L)
+#define X_ERROR_NOT_SUPPORTED                   X_RESULT_FROM_WIN32(0x00000032L)
 #define X_ERROR_INVALID_PARAMETER               X_RESULT_FROM_WIN32(0x00000057L)
 #define X_ERROR_INSUFFICIENT_BUFFER             X_RESULT_FROM_WIN32(0x0000007AL)
 #define X_ERROR_INVALID_NAME                    X_RESULT_FROM_WIN32(0x0000007BL)
@@ -120,6 +127,10 @@ typedef uint32_t X_HRESULT;
 #define X_E_DEVICE_NOT_CONNECTED                X_HRESULT_FROM_WIN32(X_ERROR_DEVICE_NOT_CONNECTED)
 #define X_E_NOTFOUND                            X_HRESULT_FROM_WIN32(X_ERROR_NOT_FOUND)
 #define X_E_NO_SUCH_USER                        X_HRESULT_FROM_WIN32(X_ERROR_NO_SUCH_USER)
+
+//IOCTL_, used by NtDeviceIoControlFile
+constexpr uint32_t X_IOCTL_DISK_GET_DRIVE_GEOMETRY = 0x70000;
+constexpr uint32_t X_IOCTL_DISK_GET_PARTITION_INFO = 0x74004;
 
 // MEM_*, used by NtAllocateVirtualMemory
 enum X_MEM : uint32_t {
@@ -250,8 +261,70 @@ struct X_UNICODE_STRING {
 };
 static_assert_size(X_UNICODE_STRING, 8);
 
-// https://pastebin.com/SMypYikG
+constexpr uint8_t XUserMaxUserCount = 4;
+
+constexpr uint8_t XUserIndexLatest = 0xFD;
+constexpr uint8_t XUserIndexNone = 0xFE;
+constexpr uint8_t XUserIndexAny = 0xFF;
+
+// https://github.com/ThirteenAG/Ultimate-ASI-Loader/blob/master/source/xlive/xliveless.h
 typedef uint32_t XNotificationID;
+enum : XNotificationID {
+  // Notification Areas
+  kXNotifySystem = 0x00000001,
+  kXNotifyLive = 0x00000002,
+  kXNotifyFriends = 0x00000004,
+  kXNotifyCustom = 0x00000008,
+  kXNotifyXmp = 0x00000020,
+  kXNotifyMsgr = 0x00000040,
+  kXNotifyParty = 0x00000080,
+  kXNotifyAll = 0x000000EF,
+
+  // XNotification System
+  kXNotificationIDSystemUI = 0x00000009,
+  kXNotificationIDSystemSignInChanged = 0x0000000A,
+  kXNotificationIDSystemStorageDevicesChanged = 0x0000000B,
+  kXNotificationIDSystemProfileSettingChanged = 0x0000000E,
+  kXNotificationIDSystemMuteListChanged = 0x00000011,
+  kXNotificationIDSystemInputDevicesChanged = 0x00000012,
+  kXNotificationIDSystemInputDeviceConfigChanged = 0x00000013,
+  kXNotificationIDSystemPlayerTimerNotice = 0x00000015,
+  kXNotificationIDSystemAvatarChanged = 0x00000017,
+  kXNotificationIDSystemNUIHardwareStatusChanged = 0x00000019,
+  kXNotificationIDSystemNUIPause = 0x0000001A,
+  kXNotificationIDSystemNUIUIApproach = 0x0000001B,
+  kXNotificationIDSystemDeviceRemap = 0x0000001C,
+  kXNotificationIDSystemNUIBindingChanged = 0x0000001D,
+  kXNotificationIDSystemAudioLatencyChanged = 0x0000001E,
+  kXNotificationIDSystemNUIChatBindingChanged = 0x0000001F,
+  kXNotificationIDSystemInputActivityChanged = 0x00000020,
+
+  // XNotification Live
+  kXNotificationIDLiveConnectionChanged = 0x02000001,
+  kXNotificationIDLiveInviteAccepted = 0x02000002,
+  kXNotificationIDLiveLinkStateChanged = 0x02000003,
+  kXNotificationIDLiveContentInstalled = 0x02000007,
+  kXNotificationIDLiveMembershipPurchased = 0x02000008,
+  kXNotificationIDLiveVoicechatAway = 0x02000009,
+  kXNotificationIDLivePresenceChanged = 0x0200000A,
+
+  // XNotification Friends
+  kXNotificationIDFriendsPresenceChanged = 0x04000001,
+  kXNotificationIDFriendsFriendAdded = 0x04000002,
+  kXNotificationIDFriendsFriendRemoved = 0x04000003,
+
+  // XNotification Custom
+  kXNotificationIDCustomActionPressed = 0x06000003,
+  kXNotificationIDCustomGamercard = 0x06000004,
+
+  // XNotification XMP
+  kNotificationXmpStateChanged = 0x0A000001,
+  kNotificationXmpPlaybackBehaviorChanged = 0x0A000002,
+  kNotificationXmpPlaybackControllerChanged = 0x0A000003,
+
+  // XNotification Party
+  kXNotificationIDPartyMembersChanged = 0x0E000002,
+};
 
 // https://github.com/CodeAsm/ffplay360/blob/master/Common/XTLOnPC.h
 struct X_VIDEO_MODE {
@@ -304,12 +377,56 @@ struct X_EX_TITLE_TERMINATE_REGISTRATION {
 };
 static_assert_size(X_EX_TITLE_TERMINATE_REGISTRATION, 16);
 
+enum X_OBJECT_HEADER_FLAGS : uint16_t {
+  OBJECT_HEADER_FLAG_NAMED_OBJECT =
+      1,  // if set, has X_OBJECT_HEADER_NAME_INFO prior to X_OBJECT_HEADER
+  OBJECT_HEADER_FLAG_IS_PERMANENT = 2,
+  OBJECT_HEADER_FLAG_CONTAINED_IN_DIRECTORY =
+      4,  // this object resides in an X_OBJECT_DIRECTORY
+  OBJECT_HEADER_IS_TITLE_OBJECT = 0x10,  // used in obcreateobject
+
+};
+
+struct X_OBJECT_DIRECTORY {
+  // each is a pointer to X_OBJECT_HEADER_NAME_INFO
+  // i believe offset 0 = pointer to next in bucket
+  xe::be<uint32_t> name_buckets[13];
+};
+static_assert_size(X_OBJECT_DIRECTORY, 0x34);
+
+// https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/ntos/ob/object_header_name_info.htm
+// quite different, though
+struct X_OBJECT_HEADER_NAME_INFO {
+  // i think that this is the next link in an X_OBJECT_DIRECTORY's buckets
+  xe::be<uint32_t> next_in_directory;
+  xe::be<uint32_t> object_directory;  // pointer to X_OBJECT_DIRECTORY
+  X_ANSI_STRING name;
+};
+
 struct X_OBJECT_ATTRIBUTES {
   xe::be<uint32_t> root_directory;  // 0x0
   xe::be<uint32_t> name_ptr;        // 0x4 PANSI_STRING
   xe::be<uint32_t> attributes;      // 0xC
 };
 
+struct X_OBJECT_TYPE {
+  xe::be<uint32_t> allocate_proc;  // 0x0
+  xe::be<uint32_t> free_proc;      // 0x4
+  xe::be<uint32_t> close_proc;     // 0x8
+  xe::be<uint32_t> delete_proc;    // 0xC
+  xe::be<uint32_t> unknown_proc;   // 0x10
+  xe::be<uint32_t>
+      unknown_size_or_object_;  // this seems to be a union, it can be a pointer
+                                // or it can be the size of the object
+  xe::be<uint32_t> pool_tag;    // 0x18
+};
+static_assert_size(X_OBJECT_TYPE, 0x1C);
+
+struct X_KSYMLINK {
+  xe::be<uint32_t> refed_object_maybe;
+  X_ANSI_STRING refed_object_name_maybe;
+};
+static_assert_size(X_KSYMLINK, 0xC);
 // https://msdn.microsoft.com/en-us/library/windows/desktop/aa363082.aspx
 typedef struct {
   // Renamed due to a collision with exception_code from Windows excpt.h.
@@ -322,6 +439,10 @@ typedef struct {
 } X_EXCEPTION_RECORD;
 static_assert_size(X_EXCEPTION_RECORD, 0x50);
 
+struct X_KSPINLOCK {
+  xe::be<uint32_t> prcb_of_owner;
+};
+static_assert_size(X_KSPINLOCK, 4);
 #pragma pack(pop)
 
 // Found by dumping the kSectionStringTable sections of various games:
@@ -381,6 +502,128 @@ enum class XContentType : uint32_t {
   kViralVideo = 0x00600000,
   kCommunityGame = 0x02000000,
 };
+
+const static std::map<XContentType, std::string> XContentTypeMap = {
+    {XContentType::kSavedGame, "Saved Game"},
+    {XContentType::kMarketplaceContent, "Marketplace Content"},
+    {XContentType::kPublisher, "Publisher"},
+    {XContentType::kXbox360Title, "Xbox 360 Title"},
+    {XContentType::kIptvPauseBuffer, "IPTV Pause Buffer"},
+    {XContentType::kXNACommunity, "XNA Community"},
+    {XContentType::kInstalledGame, "Installed Game"},
+    {XContentType::kXboxTitle, "Xbox Title"},
+    {XContentType::kSocialTitle, "Social Title"},
+    {XContentType::kGamesOnDemand, "Game on Demand"},
+    {XContentType::kSUStoragePack, "SU Storage Pack"},
+    {XContentType::kAvatarItem, "Avatar Item"},
+    {XContentType::kProfile, "Profile"},
+    {XContentType::kGamerPicture, "Gamer Picture"},
+    {XContentType::kTheme, "Theme"},
+    {XContentType::kCacheFile, "Cache File"},
+    {XContentType::kStorageDownload, "Storage Download"},
+    {XContentType::kXboxSavedGame, "Xbox Saved Game"},
+    {XContentType::kXboxDownload, "Xbox Download"},
+    {XContentType::kGameDemo, "Game Demo"},
+    {XContentType::kVideo, "Video"},
+    {XContentType::kGameTitle, "Game Title"},
+    {XContentType::kInstaller, "Installer"},
+    {XContentType::kGameTrailer, "Game Trailer"},
+    {XContentType::kArcadeTitle, "Arcade Title"},
+    {XContentType::kXNA, "XNA"},
+    {XContentType::kLicenseStore, "License Store"},
+    {XContentType::kMovie, "Movie"},
+    {XContentType::kTV, "TV"},
+    {XContentType::kMusicVideo, "Music Video"},
+    {XContentType::kGameVideo, "Game Video"},
+    {XContentType::kPodcastVideo, "Podcast Video"},
+    {XContentType::kViralVideo, "Viral Video"},
+    {XContentType::kCommunityGame, "Community Game"},
+};
+
+enum class XDeploymentType : uint32_t {
+  kOpticalDisc = 0,
+  kHardDrive = 1,  // Like extracted?
+  kGoD = 2,
+  kUnknown = 0xFF,
+};
+
+#pragma pack(push, 4)
+struct X_XAMACCOUNTINFO {
+  enum AccountReservedFlags {
+    kPasswordProtected = 0x10000000,
+    kLiveEnabled = 0x20000000,
+    kRecovering = 0x40000000,
+    kVersionMask = 0x000000FF
+  };
+
+  enum AccountUserFlags {
+    kPaymentInstrumentCreditCard = 1,
+
+    kCountryMask = 0xFF00,
+    kSubscriptionTierMask = 0xF00000,
+    kLanguageMask = 0x3E000000,
+
+    kParentalControlEnabled = 0x1000000,
+  };
+
+  enum AccountSubscriptionTier {
+    kSubscriptionTierSilver = 3,
+    kSubscriptionTierGold = 6,
+    kSubscriptionTierFamilyGold = 9
+  };
+
+  enum AccountLiveFlags { kAcctRequiresManagement = 1 };
+
+  xe::be<uint32_t> reserved_flags;
+  xe::be<uint32_t> live_flags;
+  char16_t gamertag[0x10];
+  xe::be<uint64_t> xuid_online;  // 09....
+  xe::be<uint32_t> cached_user_flags;
+  xe::be<uint32_t> network_id;
+  char passcode[4];
+  char online_domain[0x14];
+  char online_kerberos_realm[0x18];
+  char online_key[0x10];
+  char passport_membername[0x72];
+  char passport_password[0x20];
+  char owner_passport_membername[0x72];
+
+  bool IsPasscodeEnabled() {
+    return static_cast<bool>(reserved_flags &
+                             AccountReservedFlags::kPasswordProtected);
+  }
+
+  bool IsLiveEnabled() {
+    return static_cast<bool>(reserved_flags &
+                             AccountReservedFlags::kLiveEnabled);
+  }
+
+  bool IsXUIDOffline() { return ((xuid_online >> 60) & 0xF) == 0xE; }
+  bool IsXUIDOnline() { return ((xuid_online >> 48) & 0xFFFF) == 0x9; }
+  bool IsXUIDValid() { return IsXUIDOffline() != IsXUIDOnline(); }
+  bool IsTeamXUID() {
+    return (xuid_online & 0xFF00000000000140) == 0xFE00000000000100;
+  }
+
+  uint32_t GetCountry() const {
+    return (cached_user_flags & kCountryMask) >> 8;
+  }
+
+  AccountSubscriptionTier GetSubscriptionTier() const {
+    return static_cast<AccountSubscriptionTier>(
+        (cached_user_flags & kSubscriptionTierMask) >> 20);
+  }
+
+  XLanguage GetLanguage() const {
+    return static_cast<XLanguage>((cached_user_flags & kLanguageMask) >> 25);
+  }
+
+  std::string GetGamertagString() const {
+    return xe::to_utf8(std::u16string(gamertag));
+  }
+};
+static_assert_size(X_XAMACCOUNTINFO, 0x17C);
+#pragma pack(pop)
 
 }  // namespace xe
 

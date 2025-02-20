@@ -9,16 +9,9 @@
 
 #include "xenia/gpu/shader_translator.h"
 
-#include <algorithm>
 #include <cstdarg>
-#include <cstring>
-#include <set>
-#include <string>
-#include <utility>
 
-#include "xenia/base/assert.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/math.h"
 #include "xenia/gpu/gpu_flags.h"
 
 namespace xe {
@@ -418,8 +411,7 @@ void Shader::GatherVertexFetchInformation(
   for (auto& vertex_binding : vertex_bindings_) {
     if (vertex_binding.fetch_constant == op.fetch_constant_index()) {
       // It may not hold that all strides are equal, but I hope it does.
-      assert_true(!fetch_instr.attributes.stride ||
-                  vertex_binding.stride_words == fetch_instr.attributes.stride);
+
       vertex_binding.attributes.push_back({});
       attrib = &vertex_binding.attributes.back();
       break;

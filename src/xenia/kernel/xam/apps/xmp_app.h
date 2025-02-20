@@ -11,6 +11,7 @@
 #define XENIA_KERNEL_XAM_APPS_XMP_APP_H_
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +19,8 @@
 #include "xenia/base/mutex.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/app_manager.h"
+
+#include "xenia/apu/audio_driver.h"
 
 namespace xe {
 namespace kernel {
@@ -92,11 +95,9 @@ class XmpApp : public App {
                                 uint32_t buffer_length) override;
 
  private:
-  static const uint32_t kMsgStateChanged = 0x0A000001;
-  static const uint32_t kMsgPlaybackBehaviorChanged = 0x0A000002;
-  static const uint32_t kMsgPlaybackControllerChanged = 0x0A000003;
-
   void OnStateChanged();
+  void WorkerThreadMain();
+  bool PlayFile(std::string_view filename);
 
   State state_;
   PlaybackClient playback_client_;
@@ -111,6 +112,14 @@ class XmpApp : public App {
   std::unordered_map<uint32_t, Playlist*> playlists_;
   uint32_t next_playlist_handle_;
   uint32_t next_song_handle_;
+
+  std::atomic<bool> worker_running_ = {false};
+  std::unique_ptr<xe::threading::Thread> worker_thread_;
+
+  bool paused_ = true;
+  xe::threading::Fence resume_fence_;  // Signaled when resume requested.
+  std::mutex driver_mutex_ = {};
+  xe::apu::AudioDriver* driver_ = nullptr;
 };
 
 }  // namespace apps

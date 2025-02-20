@@ -21,6 +21,7 @@
 #include "xenia/base/string_buffer.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/kernel_state.h"
 
 // As with normal Microsoft, there are like twelve different ways to access
 // the audio APIs. Early games use XMA*() methods almost exclusively to touch
@@ -34,6 +35,13 @@
 // and let the normal AudioSystem handling take it, to prevent duplicate
 // implementations. They can be found in xboxkrnl_audio_xma.cc
 
+DEFINE_uint32(apu_max_queued_frames, 8,
+              "Allows changing max buffered audio frames to reduce audio "
+              "delay. Lowering this value might cause performance issues. "
+              "Value range: [4-64]",
+              "APU");
+UPDATE_from_uint32(apu_max_queued_frames, 2024, 8, 31, 20, 64);
+
 namespace xe {
 namespace apu {
 
@@ -42,11 +50,12 @@ AudioSystem::AudioSystem(cpu::Processor* processor)
       processor_(processor),
       worker_running_(false) {
   std::memset(clients_, 0, sizeof(clients_));
+  queued_frames_ = std::min(
+      static_cast<uint32_t>(kMaximumQueuedFrames),
+      std::max(cvars::apu_max_queued_frames, static_cast<uint32_t>(4)));
 
   for (size_t i = 0; i < kMaximumClientCount; ++i) {
-    client_semaphores_[i] =
-        xe::threading::Semaphore::Create(0, kMaximumQueuedFrames);
-    assert_not_null(client_semaphores_[i]);
+    client_semaphores_[i] = xe::threading::Semaphore::Create(0, queued_frames_);
     wait_handles_[i] = client_semaphores_[i].get();
   }
   shutdown_event_ = xe::threading::Event::CreateAutoResetEvent(false);
@@ -72,11 +81,14 @@ X_STATUS AudioSystem::Setup(kernel::KernelState* kernel_state) {
   }
 
   worker_running_ = true;
-  worker_thread_ = kernel::object_ref<kernel::XHostThread>(
-      new kernel::XHostThread(kernel_state, 128 * 1024, 0, [this]() {
-        WorkerThreadMain();
-        return 0;
-      }));
+  worker_thread_ =
+      kernel::object_ref<kernel::XHostThread>(new kernel::XHostThread(
+          kernel_state, 128 * 1024, 0,
+          [this]() {
+            WorkerThreadMain();
+            return 0;
+          },
+          kernel_state->GetSystemProcess()));
   // As we run audio callbacks the debugger must be able to suspend us.
   worker_thread_->set_can_debugger_suspend(true);
   worker_thread_->set_name("Audio Worker");
@@ -176,7 +188,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   assert_true(index >= 0);
 
   auto client_semaphore = client_semaphores_[index].get();
-  auto ret = client_semaphore->Release(kMaximumQueuedFrames, nullptr);
+  auto ret = client_semaphore->Release(queued_frames_, nullptr);
   assert_true(ret);
 
   AudioDriver* driver;
@@ -198,13 +210,13 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   return X_STATUS_SUCCESS;
 }
 
-void AudioSystem::SubmitFrame(size_t index, uint32_t samples_ptr) {
+void AudioSystem::SubmitFrame(size_t index, float* samples) {
   SCOPE_profile_cpu_f("apu");
 
   auto global_lock = global_critical_region_.Acquire();
   assert_true(index < kMaximumClientCount);
   assert_true(clients_[index].driver != NULL);
-  (clients_[index].driver)->SubmitFrame(samples_ptr);
+  (clients_[index].driver)->SubmitFrame(samples);
 }
 
 void AudioSystem::UnregisterClient(size_t index) {
@@ -279,7 +291,7 @@ bool AudioSystem::Restore(ByteStream* stream) {
     client.in_use = true;
 
     auto client_semaphore = client_semaphores_[id].get();
-    auto ret = client_semaphore->Release(kMaximumQueuedFrames, nullptr);
+    auto ret = client_semaphore->Release(queued_frames_, nullptr);
     assert_true(ret);
 
     AudioDriver* driver = nullptr;

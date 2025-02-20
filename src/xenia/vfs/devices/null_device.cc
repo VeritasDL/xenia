@@ -21,12 +21,12 @@ namespace vfs {
 
 NullDevice::NullDevice(const std::string& mount_path,
                        const std::initializer_list<std::string>& null_paths)
-    : Device(mount_path), null_paths_(null_paths), name_("NullDevice") {}
+    : Device(mount_path), name_("NullDevice"), null_paths_(null_paths) {}
 
 NullDevice::~NullDevice() = default;
 
 bool NullDevice::Initialize() {
-  auto root_entry = new NullEntry(this, nullptr, mount_path_);
+  auto root_entry = new NullEntry(this, nullptr, mount_path_, "");
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
 

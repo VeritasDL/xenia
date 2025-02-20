@@ -30,7 +30,8 @@ std::unique_ptr<MMIOHandler> MMIOHandler::Install(
     HostToGuestVirtual host_to_guest_virtual,
     const void* host_to_guest_virtual_context,
     AccessViolationCallback access_violation_callback,
-    void* access_violation_callback_context) {
+    void* access_violation_callback_context,
+    MmioAccessRecordCallback record_mmio_callback, void* record_mmio_context) {
   // There can be only one handler at a time.
   assert_null(global_handler_);
   if (global_handler_) {
@@ -40,7 +41,8 @@ std::unique_ptr<MMIOHandler> MMIOHandler::Install(
   auto handler = std::unique_ptr<MMIOHandler>(new MMIOHandler(
       virtual_membase, physical_membase, membase_end, host_to_guest_virtual,
       host_to_guest_virtual_context, access_violation_callback,
-      access_violation_callback_context));
+      access_violation_callback_context, record_mmio_callback,
+      record_mmio_context));
 
   // Install the exception handler directed at the MMIOHandler.
   ExceptionHandler::Install(ExceptionCallbackThunk, handler.get());
@@ -54,14 +56,18 @@ MMIOHandler::MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase,
                          HostToGuestVirtual host_to_guest_virtual,
                          const void* host_to_guest_virtual_context,
                          AccessViolationCallback access_violation_callback,
-                         void* access_violation_callback_context)
+                         void* access_violation_callback_context,
+                         MmioAccessRecordCallback record_mmio_callback,
+                         void* record_mmio_context)
     : virtual_membase_(virtual_membase),
       physical_membase_(physical_membase),
       memory_end_(membase_end),
       host_to_guest_virtual_(host_to_guest_virtual),
       host_to_guest_virtual_context_(host_to_guest_virtual_context),
       access_violation_callback_(access_violation_callback),
-      access_violation_callback_context_(access_violation_callback_context) {}
+      access_violation_callback_context_(access_violation_callback_context),
+      record_mmio_callback_(record_mmio_callback),
+      record_mmio_context_(record_mmio_context) {}
 
 MMIOHandler::~MMIOHandler() {
   ExceptionHandler::Uninstall(ExceptionCallbackThunk, this);
@@ -179,7 +185,7 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p,
   uint8_t rex_b = rex & 0b0001;
   uint8_t rex_x = rex & 0b0010;
   uint8_t rex_r = rex & 0b0100;
-  uint8_t rex_w = rex & 0b1000;
+  // uint8_t rex_w = rex & 0b1000;
 
   // http://www.sandpile.org/x86/opc_rm.htm
   // http://www.sandpile.org/x86/opc_sib.htm
@@ -412,6 +418,7 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     // Quick kill anything outside our mapping.
     return false;
   }
+
   void* fault_host_address = reinterpret_cast<void*>(ex->fault_address());
 
   // Access violations are pretty rare, so we can do a linear search here.
@@ -441,6 +448,7 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     if (cur_access != memory::PageAccess::kNoAccess &&
         (!is_write || cur_access != memory::PageAccess::kReadOnly)) {
       // Another thread has cleared this watch. Abort.
+      XELOGD("Race condition on watch, was already cleared by another thread!");
       return true;
     }
     // The address is not found within any range, so either a write watch or an
@@ -560,6 +568,13 @@ bool MMIOHandler::ExceptionCallback(Exception* ex) {
     }
   }
 #endif  // XE_ARCH_ARM64
+
+  if (record_mmio_callback_) {
+    // record that the guest address corresponding to the faulting instructions'
+    // host address reads/writes mmio. we can backpropagate this info on future
+    // compilations
+    record_mmio_callback_(record_mmio_context_, (void*)ex->pc());
+  }
 
   // Advance RIP to the next instruction so that we resume properly.
   ex->set_resume_pc(rip + decoded_load_store.length);

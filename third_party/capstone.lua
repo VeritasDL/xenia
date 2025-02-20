@@ -11,6 +11,13 @@ project("capstone")
     "CAPSTONE_USE_SYS_DYN_MEM",
     "_LIB",
   })
+  filter({"configurations:Release", "platforms:Windows"})
+	buildoptions({
+		"/Os",
+		"/O1"
+	})
+  filter {}
+
   includedirs({
     "capstone",
     "capstone/include",
@@ -32,6 +39,8 @@ project("capstone")
     "capstone/SStream.h",
     "capstone/utils.c",
     "capstone/utils.h",
+    "capstone/Mapping.c",
+    "capstone/Mapping.h",
 
     "capstone/arch/X86/*.c",
     "capstone/arch/X86/*.h",

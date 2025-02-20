@@ -62,6 +62,12 @@ filter({"configurations:Checked", "platforms:Linux"})
   defines({
     "_GLIBCXX_DEBUG",   -- libstdc++ debug mode
   })
+filter({"configurations:Release", "platforms:Windows"})
+	buildoptions({
+		"/Gw", 
+		"/GS-", 
+		"/Oy"
+	})
 
 filter("configurations:Debug")
   runtime("Release")
@@ -246,7 +252,7 @@ workspace("xenia")
   include("third_party/dxbc.lua")
   include("third_party/discord-rpc.lua")
   include("third_party/cxxopts.lua")
-  include("third_party/cpptoml.lua")
+  include("third_party/tomlplusplus.lua")
   include("third_party/FFmpeg/premake5.lua")
   include("third_party/fmt.lua")
   include("third_party/glslang-spirv.lua")
@@ -254,6 +260,10 @@ workspace("xenia")
   include("third_party/mspack.lua")
   include("third_party/snappy.lua")
   include("third_party/xxhash.lua")
+  include("third_party/zarchive.lua")
+  include("third_party/zstd.lua")
+  include("third_party/zlib.lua")
+  include("third_party/pugixml.lua")
 
   if not os.istarget("android") then
     -- SDL2 requires sdl2-config, and as of November 2020 isn't high-quality on
@@ -285,6 +295,7 @@ workspace("xenia")
   include("src/xenia/base")
   include("src/xenia/cpu")
   include("src/xenia/cpu/backend/x64")
+  include("src/xenia/debug/gdb")
   include("src/xenia/debug/ui")
   include("src/xenia/gpu")
   include("src/xenia/gpu/null")
@@ -292,6 +303,7 @@ workspace("xenia")
   include("src/xenia/hid")
   include("src/xenia/hid/nop")
   include("src/xenia/kernel")
+  include("src/xenia/patcher")
   include("src/xenia/ui")
   include("src/xenia/ui/vulkan")
   include("src/xenia/vfs")

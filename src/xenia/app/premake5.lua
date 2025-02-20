@@ -17,6 +17,7 @@ project("xenia-app")
     "xenia-hid",
     "xenia-hid-nop",
     "xenia-kernel",
+    "xenia-patcher",
     "xenia-ui",
     "xenia-ui-vulkan",
     "xenia-vfs",
@@ -65,7 +66,7 @@ project("xenia-app")
   -- `lib` prefix, as Gradle uses LOCAL_MODULE_FILENAME, not a derivative of
   -- LOCAL_MODULE, to specify the targets to build when executing ndk-build.
   filter("platforms:not Android-*")
-    targetname("xenia")
+    targetname("xenia_canary")
 
   filter("architecture:x86_64")
     links({
@@ -91,6 +92,7 @@ project("xenia-app")
       "xenia-app-discord",
       "xenia-apu-sdl",
       -- TODO(Triang3l): CPU debugger on Android.
+      "xenia-debug-gdb",
       "xenia-debug-ui",
       "xenia-helper-sdl",
       "xenia-hid-sdl",
@@ -117,6 +119,11 @@ project("xenia-app")
     links({
       "xenia-gpu-d3d12-trace-viewer",
       "xenia-ui-window-d3d12-demo",
+    })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
     })
 
   filter("platforms:Windows")

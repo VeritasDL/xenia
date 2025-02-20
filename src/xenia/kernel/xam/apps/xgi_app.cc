@@ -17,6 +17,11 @@ namespace kernel {
 namespace xam {
 namespace apps {
 
+struct X_XUSER_ACHIEVEMENT {
+  xe::be<uint32_t> user_idx;
+  xe::be<uint32_t> achievement_id;
+};
+
 XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
 
 // http://mb.mirage.org/bugzilla/xliveless/main.c
@@ -38,6 +43,23 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t context_value = xe::load_and_swap<uint32_t>(buffer + 20);
       XELOGD("XGIUserSetContextEx({:08X}, {:08X}, {:08X})", user_index,
              context_id, context_value);
+
+      const util::XdbfGameData title_xdbf = kernel_state_->title_xdbf();
+      if (title_xdbf.is_valid()) {
+        const auto context = title_xdbf.GetContext(context_id);
+        const XLanguage title_language = title_xdbf.GetExistingLanguage(
+            static_cast<XLanguage>(XLanguage::kEnglish));
+        const std::string desc =
+            title_xdbf.GetStringTableEntry(title_language, context.string_id);
+        XELOGD("XGIUserSetContextEx: {} - Set to value: {}", desc,
+               context_value);
+
+        UserProfile* user_profile =
+            kernel_state_->xam_state()->GetUserProfile(user_index);
+        if (user_profile) {
+          user_profile->contexts_[context_id] = context_value;
+        }
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0007: {
@@ -47,6 +69,26 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t value_ptr = xe::load_and_swap<uint32_t>(buffer + 24);
       XELOGD("XGIUserSetPropertyEx({:08X}, {:08X}, {}, {:08X})", user_index,
              property_id, value_size, value_ptr);
+
+      const util::XdbfGameData title_xdbf = kernel_state_->title_xdbf();
+      if (title_xdbf.is_valid()) {
+        const auto property_xdbf = title_xdbf.GetProperty(property_id);
+        const XLanguage title_language = title_xdbf.GetExistingLanguage(
+            static_cast<XLanguage>(XLanguage::kEnglish));
+        const std::string desc = title_xdbf.GetStringTableEntry(
+            title_language, property_xdbf.string_id);
+
+        Property property =
+            Property(property_id, value_size,
+                     memory_->TranslateVirtual<uint8_t*>(value_ptr));
+
+        auto user = kernel_state_->xam_state()->GetUserProfile(user_index);
+        if (user) {
+          user->AddProperty(&property);
+        }
+        XELOGD("XGIUserSetPropertyEx: Setting property: {}", desc);
+      }
+
       return X_E_SUCCESS;
     }
     case 0x000B0008: {
@@ -55,6 +97,13 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       uint32_t achievements_ptr = xe::load_and_swap<uint32_t>(buffer + 4);
       XELOGD("XGIUserWriteAchievements({:08X}, {:08X})", achievement_count,
              achievements_ptr);
+
+      auto* achievement =
+          (X_XUSER_ACHIEVEMENT*)memory_->TranslateVirtual(achievements_ptr);
+      for (uint32_t i = 0; i < achievement_count; i++, achievement++) {
+        kernel_state_->achievement_manager()->EarnAchievement(
+            achievement->user_idx, 0, achievement->achievement_id);
+      }
       return X_E_SUCCESS;
     }
     case 0x000B0010: {
@@ -108,6 +157,34 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       XELOGD("XGI_unknown");
       return X_STATUS_SUCCESS;
     }
+    case 0x000B0021: {
+      struct XLeaderboard {
+        xe::be<uint32_t> titleId;
+        xe::be<uint32_t> xuids_count;
+        xe::be<uint32_t> xuids_guest_address;
+        xe::be<uint32_t> specs_count;
+        xe::be<uint32_t> specs_guest_address;
+        xe::be<uint32_t> results_size;
+        xe::be<uint32_t> results_guest_address;
+      }* data = reinterpret_cast<XLeaderboard*>(buffer);
+
+      if (!data->results_guest_address) {
+        return 1;
+      }
+    }
+    case 0x000B0036: {
+      // Called after opening xbox live arcade and clicking on xbox live v5759
+      // to 5787 and called after clicking xbox live in the game library from
+      // v6683 to v6717
+      XELOGD("XGIUnkB0036, unimplemented");
+      return X_E_FAIL;
+    }
+    case 0x000B003D: {
+      // Games used in:
+      // - 5451082a (netplay build).
+      XELOGD("XGIUnkB003D, unimplemented");
+      return X_E_FAIL;
+    }
     case 0x000B0041: {
       assert_true(!buffer_length || buffer_length == 32);
       // 00000000 2789fecc 00000000 00000000 200491e0 00000000 200491f0 20049340
@@ -121,6 +198,14 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
              context_ptr, context_id);
       uint32_t value = 0;
       if (context) {
+        UserProfile* user_profile =
+            kernel_state_->xam_state()->GetUserProfile(user_index);
+        if (user_profile) {
+          if (user_profile->contexts_.find(context_id) !=
+              user_profile->contexts_.cend()) {
+            value = user_profile->contexts_[context_id];
+          }
+        }
         xe::store_and_swap<uint32_t>(context + 4, value);
       }
       return X_E_FAIL;

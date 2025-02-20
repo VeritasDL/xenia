@@ -24,6 +24,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/draw_util.h"
 #include "xenia/gpu/gpu_flags.h"
+#include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/shader.h"
 #include "xenia/gpu/spirv_shader_translator.h"
@@ -32,9 +33,13 @@
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/vulkan/vulkan_shared_memory.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 #include "xenia/ui/vulkan/vulkan_presenter.h"
 #include "xenia/ui/vulkan/vulkan_provider.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
+
+DECLARE_bool(clear_memory_page_state);
 
 namespace xe {
 namespace gpu {
@@ -1224,7 +1229,14 @@ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     }
   }
 }
-
+void VulkanCommandProcessor::WriteRegistersFromMem(uint32_t start_index,
+                                                   uint32_t* base,
+                                                   uint32_t num_registers) {
+  for (uint32_t i = 0; i < num_registers; ++i) {
+    uint32_t data = xe::load_and_swap<uint32_t>(base + i);
+    VulkanCommandProcessor::WriteRegister(start_index + i, data);
+  }
+}
 void VulkanCommandProcessor::SparseBindBuffer(
     VkBuffer buffer, uint32_t bind_count, const VkSparseMemoryBind* binds,
     VkPipelineStageFlags wait_stage_mask) {
@@ -1274,8 +1286,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     return;
   }
 
+  auto aspect = graphics_system_->GetScaledAspectRatio();
+
   presenter->RefreshGuestOutput(
-      frontbuffer_width_scaled, frontbuffer_height_scaled, 1280, 720,
+      frontbuffer_width_scaled, frontbuffer_height_scaled, aspect.first,
+      aspect.second,
       [this, frontbuffer_width_scaled, frontbuffer_height_scaled,
        frontbuffer_format, swap_texture_view](
           ui::Presenter::GuestOutputRefreshContext& context) -> bool {
@@ -2436,6 +2451,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // Get dynamic rasterizer state.
   draw_util::ViewportInfo viewport_info;
+
   // Just handling maxViewportDimensions is enough - viewportBoundsRange[1] must
   // be at least 2 * max(maxViewportDimensions[0...1]) - 1, and
   // maxViewportDimensions must be greater than or equal to the size of the
@@ -2452,11 +2468,15 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // life. Or even disregard the viewport bounds range in the fragment shader
   // interlocks case completely - apply the viewport and the scissor offset
   // directly to pixel address and to things like ps_param_gen.
-  draw_util::GetHostViewportInfo(
-      regs, 1, 1, false, device_info.maxViewportDimensions[0],
-      device_info.maxViewportDimensions[1], true, normalized_depth_control,
-      false, host_render_targets_used,
-      pixel_shader && pixel_shader->writes_depth(), viewport_info);
+  draw_util::GetViewportInfoArgs gviargs{};
+  gviargs.Setup(1, 1, divisors::MagicDiv{1}, divisors::MagicDiv{1}, false,
+                device_info.maxViewportDimensions[0],
+                device_info.maxViewportDimensions[1], true,
+                normalized_depth_control, false, host_render_targets_used,
+                pixel_shader && pixel_shader->writes_depth());
+  gviargs.SetupRegisterValues(regs);
+
+  draw_util::GetHostViewportInfo(&gviargs, viewport_info);
 
   // Update dynamic graphics pipeline state.
   UpdateDynamicState(viewport_info, primitive_polygonal,
@@ -3153,6 +3173,10 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   }
 
   if (is_closing_frame) {
+    if (cvars::clear_memory_page_state) {
+      shared_memory_->SetSystemPageBlocksValidWithGpuDataWritten();
+    }
+
     frame_open_ = false;
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kMaxFramesInFlight] =
@@ -4499,6 +4523,8 @@ uint32_t VulkanCommandProcessor::WriteTransientTextureBindings(
   return descriptor_set_write_count;
 }
 
+#define COMMAND_PROCESSOR VulkanCommandProcessor
+#include "../pm4_command_processor_implement.h"
 }  // namespace vulkan
 }  // namespace gpu
 }  // namespace xe

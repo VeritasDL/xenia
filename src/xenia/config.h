@@ -11,6 +11,9 @@
 #define XENIA_CONFIG_H_
 
 #include <filesystem>
+#include "third_party/tomlplusplus/toml.hpp"
+
+toml::parse_result ParseFile(const std::filesystem::path& filename);
 
 namespace config {
 void SetupConfig(const std::filesystem::path& config_folder);

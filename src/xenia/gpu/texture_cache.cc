@@ -9,21 +9,11 @@
 
 #include "xenia/gpu/texture_cache.h"
 
-#include <algorithm>
-#include <cstdint>
-#include <utility>
-
-#include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
-#include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"
-#include "xenia/gpu/register_file.h"
-#include "xenia/gpu/texture_info.h"
-#include "xenia/gpu/texture_util.h"
-#include "xenia/gpu/xenos.h"
 
 DEFINE_int32(
     draw_resolution_scale_x, 1,
@@ -154,7 +144,9 @@ TextureCache::TextureCache(const RegisterFile& register_file,
     : register_file_(register_file),
       shared_memory_(shared_memory),
       draw_resolution_scale_x_(draw_resolution_scale_x),
-      draw_resolution_scale_y_(draw_resolution_scale_y) {
+      draw_resolution_scale_y_(draw_resolution_scale_y),
+      draw_resolution_scale_x_divisor_(draw_resolution_scale_x),
+      draw_resolution_scale_y_divisor_(draw_resolution_scale_y) {
   assert_true(draw_resolution_scale_x >= 1);
   assert_true(draw_resolution_scale_x <= kMaxDrawResolutionScaleAlongAxis);
   assert_true(draw_resolution_scale_y >= 1);
@@ -187,6 +179,7 @@ bool TextureCache::GetConfigDrawResolutionScale(uint32_t& x_out,
       uint32_t(std::max(INT32_C(1), cvars::draw_resolution_scale_x));
   uint32_t config_y =
       uint32_t(std::max(INT32_C(1), cvars::draw_resolution_scale_y));
+
   uint32_t clamped_x = std::min(kMaxDrawResolutionScaleAlongAxis, config_x);
   uint32_t clamped_y = std::min(kMaxDrawResolutionScaleAlongAxis, config_y);
   x_out = clamped_x;
@@ -329,9 +322,13 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
   uint32_t bindings_changed = 0;
   uint32_t textures_remaining = used_texture_mask & ~texture_bindings_in_sync_;
   uint32_t index = 0;
+
+  Texture* textures_to_load[64];  // max bits = 32, can be unsigned + signed
+                                  // means max array size = 64
+  uint32_t num_textures_to_load = 0;
   while (xe::bit_scan_forward(textures_remaining, &index)) {
     uint32_t index_bit = UINT32_C(1) << index;
-    textures_remaining &= ~index_bit;
+    textures_remaining = xe::clear_lowest_bit(textures_remaining);
     TextureBinding& binding = texture_bindings_[index];
     xenos::xe_gpu_texture_fetch_t fetch = regs.GetTextureFetch(index);
     TextureKey old_key = binding.key;
@@ -402,12 +399,15 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
       binding.texture_signed = nullptr;
     }
     if (load_unsigned_data && binding.texture != nullptr) {
-      LoadTextureData(*binding.texture);
+      textures_to_load[num_textures_to_load++] = binding.texture;
     }
     if (load_signed_data && binding.texture_signed != nullptr) {
-      LoadTextureData(*binding.texture_signed);
+      textures_to_load[num_textures_to_load++] = binding.texture_signed;
     }
   }
+
+  LoadTexturesData(textures_to_load, num_textures_to_load);
+
   if (bindings_changed) {
     UpdateTextureBindingsImpl(bindings_changed);
   }
@@ -436,7 +436,7 @@ void TextureCache::TextureKey::LogAction(const char* action) const {
       "base at 0x{:08X} (pitch {}), mips at 0x{:08X}",
       action, tiled ? "tiled" : "linear", scaled_resolve ? "scaled " : "",
       GetWidth(), GetHeight(), GetDepthOrArraySize(), GetLogDimensionName(),
-      FormatInfo::Get(format)->name, mip_max_level + 1, packed_mips ? "" : "un",
+      FormatInfo::GetName(format), mip_max_level + 1, packed_mips ? "" : "un",
       mip_max_level != 0 ? "s" : "", base_page << 12, pitch << 5,
       mip_page << 12);
 }
@@ -449,7 +449,7 @@ void TextureCache::Texture::LogAction(const char* action) const {
       action, key_.tiled ? "tiled" : "linear",
       key_.scaled_resolve ? "scaled " : "", key_.GetWidth(), key_.GetHeight(),
       key_.GetDepthOrArraySize(), key_.GetLogDimensionName(),
-      FormatInfo::Get(key_.format)->name, key_.mip_max_level + 1,
+      FormatInfo::GetName(key_.format), key_.mip_max_level + 1,
       key_.packed_mips ? "" : "un", key_.mip_max_level != 0 ? "s" : "",
       key_.base_page << 12, key_.pitch << 5, GetGuestBaseSize(),
       key_.mip_page << 12, GetGuestMipsSize());
@@ -506,7 +506,7 @@ TextureCache::Texture::~Texture() {
 }
 
 void TextureCache::Texture::MakeUpToDateAndWatch(
-    const std::unique_lock<std::recursive_mutex>& global_lock) {
+    const global_unique_lock_type& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
   if (base_outdated_) {
     assert_not_zero(GetGuestBaseSize());
@@ -551,8 +551,7 @@ void TextureCache::Texture::MarkAsUsed() {
 }
 
 void TextureCache::Texture::WatchCallback(
-    [[maybe_unused]] const std::unique_lock<std::recursive_mutex>& global_lock,
-    bool is_mip) {
+    [[maybe_unused]] const global_unique_lock_type& global_lock, bool is_mip) {
   if (is_mip) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = true;
@@ -564,9 +563,9 @@ void TextureCache::Texture::WatchCallback(
   }
 }
 
-void TextureCache::WatchCallback(
-    const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
-    void* data, uint64_t argument, bool invalidated_by_gpu) {
+void TextureCache::WatchCallback(const global_unique_lock_type& global_lock,
+                                 void* context, void* data, uint64_t argument,
+                                 bool invalidated_by_gpu) {
   Texture& texture = *static_cast<Texture*>(context);
   texture.WatchCallback(global_lock, argument != 0);
   texture.texture_cache().texture_became_outdated_.store(
@@ -640,7 +639,134 @@ TextureCache::Texture* TextureCache::FindOrCreateTexture(TextureKey key) {
   texture->LogAction("Created");
   return texture;
 }
+void TextureCache::LoadTexturesData(Texture** textures, uint32_t n_textures) {
+  assert_true(n_textures <= 64);
+  if (n_textures < 2) {
+    if (!n_textures) {
+      return;
+    } else {
+      LoadTextureData(*textures[0]);
+      return;
+    }
+  }
 
+  uint64_t index_base_outdated = 0;
+  uint64_t index_mips_outdated = 0;
+  uint32_t nkept = 0;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+    for (uint32_t i = 0; i < n_textures; ++i) {
+      Texture* current = textures[i];
+
+      auto base_outdated = current->base_outdated(global_lock);
+      auto mips_outdated = current->mips_outdated(global_lock);
+
+      index_base_outdated |= static_cast<uint64_t>(base_outdated) << i;
+      index_mips_outdated |= static_cast<uint64_t>(mips_outdated) << i;
+      if (!base_outdated && !mips_outdated) {
+        textures[i] = nullptr;
+
+      } else {
+        nkept++;
+      }
+    }
+  }
+
+  if (nkept == 0) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < n_textures; ++i) {
+    Texture* p_texture = textures[i];
+    if (!p_texture) {
+      continue;
+    }
+    textures[i] = nullptr;
+    Texture& texture = *p_texture;
+
+    TextureKey texture_key = texture.key();
+    // Implementation may load multiple blocks at once via accesses of up to 128
+    // bits (R32G32B32A32_UINT), so aligning the size to this value to make sure
+    // if the texture is small (especially if it's linear), the last blocks
+    // won't be cut off (hosts may return 0, 0, 0, 0 for the whole
+    // R32G32B32A32_UINT access for the non-16-aligned tail even if 1...15 bytes
+    // are actually provided for it).
+
+    // Request uploading of the texture data to the shared memory.
+    // This is also necessary when resolution scaling is used - the texture
+    // cache relies on shared memory for invalidation of both unscaled and
+    // scaled textures. Plus a texture may be unscaled partially, when only a
+    // portion of its pages is invalidated, in this case we'll need the texture
+    // from the shared memory to load the unscaled parts.
+    // TODO(Triang3l): Load unscaled parts.
+    bool base_resolved = texture.GetBaseResolved();
+    if (index_base_outdated & (1ULL << i)) {
+      if (!shared_memory().RequestRange(
+              texture_key.base_page << 12,
+              xe::align(texture.GetGuestBaseSize(), UINT32_C(16)),
+              texture_key.scaled_resolve ? nullptr : &base_resolved)) {
+        continue;
+      }
+    }
+    bool mips_resolved = texture.GetMipsResolved();
+    if (index_mips_outdated & (1ULL << i)) {
+      if (!shared_memory().RequestRange(
+              texture_key.mip_page << 12,
+              xe::align(texture.GetGuestMipsSize(), UINT32_C(16)),
+              texture_key.scaled_resolve ? nullptr : &mips_resolved)) {
+        continue;
+      }
+    }
+    if (texture_key.scaled_resolve) {
+      // Make sure all the scaled resolve memory is resident and accessible from
+      // the shader, including any possible padding that hasn't yet been touched
+      // by an actual resolve, but is still included in the texture size, so the
+      // GPU won't be trying to access unmapped memory.
+      if (!EnsureScaledResolveMemoryCommitted(texture_key.base_page << 12,
+                                              texture.GetGuestBaseSize(), 4)) {
+        continue;
+      }
+      if (!EnsureScaledResolveMemoryCommitted(texture_key.mip_page << 12,
+                                              texture.GetGuestMipsSize(), 4)) {
+        continue;
+      }
+    }
+
+    // Actually load the texture data.
+    if (!LoadTextureDataFromResidentMemoryImpl(
+            texture, (index_base_outdated & (1ULL << i)) != 0,
+            (index_mips_outdated & (1ULL << i)) != 0)) {
+      continue;
+    }
+
+    // Update the source of the texture (resolve vs. CPU or memexport) for
+    // purposes of handling piecewise gamma emulation via sRGB and for
+    // resolution scale in sampling offsets.
+    if (!texture_key.scaled_resolve) {
+      texture.SetBaseResolved(base_resolved);
+      texture.SetMipsResolved(mips_resolved);
+    }
+    // reque for makeuptodatandwatch
+    textures[i] = &texture;
+  }
+  {
+    auto crit = global_critical_region_.Acquire();
+
+    for (uint32_t i = 0; i < n_textures; ++i) {
+      auto texture = textures[i];
+      if (!texture) {
+        continue;
+      }
+      // Mark the ranges as uploaded and watch them. This is needed for scaled
+      // resolves as well to detect when the CPU wants to reuse the memory for a
+      // regular texture or a vertex buffer, and thus the scaled resolve version
+      // is not up to date anymore.
+      texture->MakeUpToDateAndWatch(crit);
+
+      texture->LogAction("Loaded");
+    }
+  }
+}
 bool TextureCache::LoadTextureData(Texture& texture) {
   // Check what needs to be uploaded.
   bool base_outdated, mips_outdated;
@@ -901,7 +1027,7 @@ bool TextureCache::IsRangeScaledResolved(uint32_t start_unscaled,
 }
 
 void TextureCache::ScaledResolveGlobalWatchCallbackThunk(
-    const std::unique_lock<std::recursive_mutex>& global_lock, void* context,
+    const global_unique_lock_type& global_lock, void* context,
     uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
   TextureCache* texture_cache = reinterpret_cast<TextureCache*>(context);
   texture_cache->ScaledResolveGlobalWatchCallback(
@@ -909,8 +1035,8 @@ void TextureCache::ScaledResolveGlobalWatchCallbackThunk(
 }
 
 void TextureCache::ScaledResolveGlobalWatchCallback(
-    const std::unique_lock<std::recursive_mutex>& global_lock,
-    uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu) {
+    const global_unique_lock_type& global_lock, uint32_t address_first,
+    uint32_t address_last, bool invalidated_by_gpu) {
   assert_true(IsDrawResolutionScaled());
   if (invalidated_by_gpu) {
     // Resolves themselves do exactly the opposite of what this should do.

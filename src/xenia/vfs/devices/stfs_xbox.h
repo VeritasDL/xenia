@@ -2,7 +2,7 @@
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
  ******************************************************************************
- * Copyright 2021 Ben Vanik. All rights reserved.                             *
+ * Copyright 2022 Ben Vanik. All rights reserved.                             *
  * Released under the BSD license - see LICENSE in the root for more details. *
  ******************************************************************************
  */
@@ -12,9 +12,9 @@
 
 #include <time.h>
 
-#include "xenia/xbox.h"
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/util/xex2_info.h"
+#include "xenia/xbox.h"
 
 namespace xe {
 namespace vfs {
@@ -340,7 +340,8 @@ struct XContentMetadata {
   } description_ex_raw;
 
   std::u16string display_name(XLanguage language) const {
-    uint32_t lang_id = uint32_t(language) - 1;
+    uint32_t lang_id =
+        language == XLanguage::kInvalid ? 1 : uint32_t(language) - 1;
 
     if (lang_id >= kNumLanguagesV2) {
       assert_always();
@@ -483,13 +484,21 @@ struct XContentHeader {
 static_assert_size(XContentHeader, 0x344);
 #pragma pack(pop)
 
-struct StfsHeader {
-  XContentHeader header;
-  XContentMetadata metadata;
+struct XContentContainerHeader {
+  XContentHeader content_header;
+  XContentMetadata content_metadata;
   // TODO: title/system updates contain more data after XContentMetadata, seems
   // to affect header.header_size
+
+  bool is_package_readonly() const {
+    if (content_metadata.volume_type == vfs::XContentVolumeType::kSvod) {
+      return true;
+    }
+
+    return content_metadata.volume_descriptor.stfs.flags.bits.read_only_format;
+  }
 };
-static_assert_size(StfsHeader, 0x971A);
+static_assert_size(XContentContainerHeader, 0x971A);
 
 }  // namespace vfs
 }  // namespace xe

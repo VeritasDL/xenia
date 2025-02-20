@@ -33,11 +33,15 @@ class Clock {
   // Either from platform suplied time source or from hardware directly.
   static uint64_t host_tick_frequency_platform();
 #if XE_CLOCK_RAW_AVAILABLE
+  XE_NOINLINE
   static uint64_t host_tick_frequency_raw();
 #endif
   // Host tick count. Generally QueryHostTickCount() should be used.
   static uint64_t host_tick_count_platform();
 #if XE_CLOCK_RAW_AVAILABLE
+  // chrispy: the way msvc was ordering the branches was causing rdtsc to be
+  // speculatively executed each time the branch history was lost
+  XE_NOINLINE
   static uint64_t host_tick_count_raw();
 #endif
 
@@ -49,6 +53,8 @@ class Clock {
   static uint64_t QueryHostSystemTime();
   // Queries the milliseconds since the host began.
   static uint64_t QueryHostUptimeMillis();
+
+  static uint64_t QueryHostInterruptTime();
 
   // Guest time scalar.
   static double guest_time_scalar();
@@ -70,10 +76,14 @@ class Clock {
   // Queries the current guest tick count, accounting for frequency adjustment
   // and scaling.
   static uint64_t QueryGuestTickCount();
+
+  static uint64_t* GetGuestTickCountPointer();
   // Queries the guest time, in FILETIME format, accounting for scaling.
   static uint64_t QueryGuestSystemTime();
   // Queries the milliseconds since the guest began, accounting for scaling.
   static uint32_t QueryGuestUptimeMillis();
+
+  static uint64_t QueryGuestInterruptTime();
 
   // Sets the system time of the guest.
   static void SetGuestSystemTime(uint64_t system_time);

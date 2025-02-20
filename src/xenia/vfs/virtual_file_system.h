@@ -28,6 +28,8 @@ class VirtualFileSystem {
   VirtualFileSystem();
   ~VirtualFileSystem();
 
+  void Clear();
+
   bool RegisterDevice(std::unique_ptr<Device> device);
   bool UnregisterDevice(const std::string_view path);
 
@@ -46,6 +48,14 @@ class VirtualFileSystem {
                     uint32_t desired_access, bool is_directory,
                     bool is_non_directory, File** out_file,
                     FileAction* out_action);
+
+  static X_STATUS ExtractContentFile(Entry* entry,
+                                     std::filesystem::path base_path,
+                                     bool extract_to_root = false);
+  static X_STATUS ExtractContentFiles(Device* device,
+                                      std::filesystem::path base_path);
+  static void ExtractContentHeader(Device* device,
+                                   std::filesystem::path base_path);
 
  private:
   xe::global_critical_region global_critical_region_;

@@ -406,18 +406,21 @@ bool D3D12SharedMemory::AllocateSparseHostGpuMemoryRange(
 }
 
 bool D3D12SharedMemory::UploadRanges(
-    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
-  if (upload_page_ranges.empty()) {
+    const std::pair<uint32_t, uint32_t>* upload_page_ranges,
+    uint32_t num_upload_page_ranges) {
+  if (!num_upload_page_ranges) {
     return true;
   }
   CommitUAVWritesAndTransitionBuffer(D3D12_RESOURCE_STATE_COPY_DEST);
   command_processor_.SubmitBarriers();
   auto& command_list = command_processor_.GetDeferredCommandList();
-  for (auto upload_range : upload_page_ranges) {
+  for (uint32_t i = 0; i < num_upload_page_ranges; ++i) {
+    auto& upload_range = upload_page_ranges[i];
     uint32_t upload_range_start = upload_range.first;
     uint32_t upload_range_length = upload_range.second;
     trace_writer_.WriteMemoryRead(upload_range_start << page_size_log2(),
                                   upload_range_length << page_size_log2());
+
     while (upload_range_length != 0) {
       ID3D12Resource* upload_buffer;
       size_t upload_buffer_offset, upload_buffer_size;
@@ -432,10 +435,20 @@ bool D3D12SharedMemory::UploadRanges(
       }
       MakeRangeValid(upload_range_start << page_size_log2(),
                      uint32_t(upload_buffer_size), false, false);
-      std::memcpy(
-          upload_buffer_mapping,
-          memory().TranslatePhysical(upload_range_start << page_size_log2()),
-          upload_buffer_size);
+
+      if (upload_buffer_size < (1ULL << 32) && upload_buffer_size > 8192) {
+        memory::vastcpy(
+            upload_buffer_mapping,
+            memory().TranslatePhysical(upload_range_start << page_size_log2()),
+            static_cast<uint32_t>(upload_buffer_size));
+        swcache::WriteFence();
+
+      } else {
+        memcpy(
+            upload_buffer_mapping,
+            memory().TranslatePhysical(upload_range_start << page_size_log2()),
+            upload_buffer_size);
+      }
       command_list.D3DCopyBufferRegion(
           buffer_, upload_range_start << page_size_log2(), upload_buffer,
           UINT64(upload_buffer_offset), UINT64(upload_buffer_size));

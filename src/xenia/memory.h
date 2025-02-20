@@ -20,7 +20,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/mmio_handler.h"
-
+#include "xenia/guest_pointers.h"
 namespace xe {
 class ByteStream;
 }  // namespace xe
@@ -113,6 +113,17 @@ class BaseHeap {
   // Size of each page within the heap range in bytes.
   uint32_t page_size() const { return page_size_; }
 
+  // Amount of pages assigned to heap
+  uint32_t total_page_count() const { return uint32_t(page_table_.size()); }
+
+  // Sum of unreserved pages in heap
+  uint32_t unreserved_page_count() const { return unreserved_page_count_; }
+
+  // Sum of reserved pages in heap
+  uint32_t reserved_page_count() const {
+    return total_page_count() - unreserved_page_count();
+  }
+
   // Type of specified heap
   HeapType heap_type() const { return heap_type_; }
 
@@ -131,9 +142,6 @@ class BaseHeap {
 
   // Dumps information about all allocations within the heap to the log.
   void DumpMap();
-
-  uint32_t GetTotalPageCount();
-  uint32_t GetUnreservedPageCount();
 
   // Allocates pages with the given properties and allocation strategy.
   // This can reserve and commit the pages as well as set protection modes.
@@ -157,6 +165,9 @@ class BaseHeap {
                           uint32_t allocation_type, uint32_t protect,
                           bool top_down, uint32_t* out_address);
 
+  virtual bool AllocSystemHeap(uint32_t size, uint32_t alignment,
+                               uint32_t allocation_type, uint32_t protect,
+                               bool top_down, uint32_t* out_address);
   // Decommits pages in the given range.
   // Partial overlapping pages will also be decommitted.
   virtual bool Decommit(uint32_t address, uint32_t size);
@@ -205,7 +216,9 @@ class BaseHeap {
   uint32_t heap_base_;
   uint32_t heap_size_;
   uint32_t page_size_;
+  uint32_t page_size_shift_;
   uint32_t host_address_offset_;
+  uint32_t unreserved_page_count_;
   xe::global_critical_region global_critical_region_;
   std::vector<PageEntry> page_table_;
 };
@@ -246,6 +259,9 @@ class PhysicalHeap : public BaseHeap {
                   uint32_t alignment, uint32_t allocation_type,
                   uint32_t protect, bool top_down,
                   uint32_t* out_address) override;
+  bool AllocSystemHeap(uint32_t size, uint32_t alignment,
+                       uint32_t allocation_type, uint32_t protect,
+                       bool top_down, uint32_t* out_address) override;
   bool Decommit(uint32_t address, uint32_t size) override;
   bool Release(uint32_t base_address,
                uint32_t* out_region_size = nullptr) override;
@@ -255,19 +271,38 @@ class PhysicalHeap : public BaseHeap {
   void EnableAccessCallbacks(uint32_t physical_address, uint32_t length,
                              bool enable_invalidation_notifications,
                              bool enable_data_providers);
+  template <bool enable_invalidation_notifications>
+  XE_NOINLINE void EnableAccessCallbacksInner(
+      const uint32_t system_page_first, const uint32_t system_page_last,
+      xe::memory::PageAccess protect_access) XE_RESTRICT;
+
   // Returns true if any page in the range was watched.
-  bool TriggerCallbacks(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
-      uint32_t virtual_address, uint32_t length, bool is_write,
-      bool unwatch_exact_range, bool unprotect = true);
+  bool TriggerCallbacks(global_unique_lock_type global_lock_locked_once,
+                        uint32_t virtual_address, uint32_t length,
+                        bool is_write, bool unwatch_exact_range,
+                        bool unprotect = true);
 
   uint32_t GetPhysicalAddress(uint32_t address) const;
+
+  uint32_t SystemPagenumToGuestPagenum(uint32_t num) const {
+    return ((num << system_page_shift_) - host_address_offset()) >>
+           page_size_shift_;
+  }
+
+  uint32_t GuestPagenumToSystemPagenum(uint32_t num) {
+    num <<= page_size_shift_;
+    num += host_address_offset();
+    num >>= system_page_shift_;
+    return num;
+  }
 
  protected:
   VirtualHeap* parent_heap_;
 
   uint32_t system_page_size_;
   uint32_t system_page_count_;
+  uint32_t system_page_shift_;
+  uint32_t padding1_;
 
   struct SystemPageFlagsBlock {
     // Whether writing to each page should result trigger invalidation
@@ -318,12 +353,32 @@ class Memory {
   // Note that the contents at the specified host address are big-endian.
   template <typename T = uint8_t*>
   inline T TranslateVirtual(uint32_t guest_address) const {
+#if XE_PLATFORM_WIN32 == 1
+    uint8_t* host_address = virtual_membase_ + guest_address;
+    if (guest_address >= 0xE0000000) {
+      host_address += 0x1000;
+    }
+    return reinterpret_cast<T>(host_address);
+#else
     uint8_t* host_address = virtual_membase_ + guest_address;
     const auto heap = LookupHeap(guest_address);
     if (heap) {
       host_address += heap->host_address_offset();
     }
     return reinterpret_cast<T>(host_address);
+
+#endif
+  }
+  template <typename T>
+  inline T* TranslateVirtual(TypedGuestPointer<T> guest_address) {
+    return TranslateVirtual<T*>(guest_address.m_ptr);
+  }
+  template <typename T>
+  inline xe::be<T>* TranslateVirtualBE(uint32_t guest_address)
+      XE_RESTRICT const {
+    static_assert(!std::is_pointer_v<T> &&
+                  sizeof(T) > 1);  // maybe assert is_integral?
+    return TranslateVirtual<xe::be<T>*>(guest_address);
   }
 
   // Base address of physical memory in the host address space.
@@ -444,9 +499,9 @@ class Memory {
   // TODO(Triang3l): Implement data providers - this is why locking depth of 1
   // will be required in the future.
   bool TriggerPhysicalMemoryCallbacks(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
-      uint32_t virtual_address, uint32_t length, bool is_write,
-      bool unwatch_exact_range, bool unprotect = true);
+      global_unique_lock_type global_lock_locked_once, uint32_t virtual_address,
+      uint32_t length, bool is_write, bool unwatch_exact_range,
+      bool unprotect = true);
 
   // Allocates virtual memory from the 'system' heap.
   // System memory is kept separate from game memory but is still accessible
@@ -456,11 +511,12 @@ class Memory {
                            uint32_t system_heap_flags = kSystemHeapDefault);
 
   // Frees memory allocated with SystemHeapAlloc.
-  void SystemHeapFree(uint32_t address);
+  void SystemHeapFree(uint32_t address, uint32_t* out_region_size = nullptr);
 
   // Gets the heap for the address space containing the given address.
+  XE_NOALIAS
   const BaseHeap* LookupHeap(uint32_t address) const;
-
+  XE_NOALIAS
   inline BaseHeap* LookupHeap(uint32_t address) {
     return const_cast<BaseHeap*>(
         const_cast<const Memory*>(this)->LookupHeap(address));
@@ -472,11 +528,19 @@ class Memory {
   // Gets the physical base heap.
   VirtualHeap* GetPhysicalHeap();
 
+  void GetHeapsPageStatsSummary(const BaseHeap* const* provided_heaps,
+                                size_t heaps_count, uint32_t& unreserved_pages,
+                                uint32_t& reserved_pages, uint32_t& used_pages,
+                                uint32_t& reserved_bytes);
+
   // Dumps a map of all allocated memory to the log.
   void DumpMap();
 
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
+
+  void SetMMIOExceptionRecordingCallback(cpu::MmioAccessRecordCallback callback,
+                                         void* context);
 
  private:
   int MapViews(uint8_t* mapping_base);
@@ -485,12 +549,11 @@ class Memory {
   static uint32_t HostToGuestVirtualThunk(const void* context,
                                           const void* host_address);
 
-  bool AccessViolationCallback(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
-      void* host_address, bool is_write);
+  bool AccessViolationCallback(global_unique_lock_type global_lock_locked_once,
+                               void* host_address, bool is_write);
   static bool AccessViolationCallbackThunk(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
-      void* context, void* host_address, bool is_write);
+      global_unique_lock_type global_lock_locked_once, void* context,
+      void* host_address, bool is_write);
 
   std::filesystem::path file_name_;
   uint32_t system_page_size_ = 0;

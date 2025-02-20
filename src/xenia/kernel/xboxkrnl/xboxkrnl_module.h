@@ -28,6 +28,8 @@ namespace xboxkrnl {
 class XboxkrnlModule : public KernelModule {
  public:
   static constexpr size_t kExLoadedImageNameSize = 255 + 1;
+  static constexpr size_t kExLoadedCommandLineSize =
+      1024;  // Based on max size provided for XamLoaderGetLaunchData
 
   XboxkrnlModule(Emulator* emulator, KernelState* kernel_state);
   virtual ~XboxkrnlModule();
@@ -40,9 +42,6 @@ class XboxkrnlModule : public KernelModule {
 
  protected:
   uint32_t pix_function_ = 0;
-
- private:
-  std::unique_ptr<xe::threading::HighResolutionTimer> timestamp_timer_;
 };
 
 }  // namespace xboxkrnl

@@ -25,6 +25,9 @@
 #include "winkey_binding_table.inc"
 #undef XE_HID_WINKEY_BINDING
 
+DEFINE_int32(keyboard_user_index, 0, "Controller port that keyboard emulates",
+             "HID.WinKey");
+
 namespace xe {
 namespace hid {
 namespace winkey {
@@ -101,7 +104,7 @@ X_STATUS WinKeyInputDriver::Setup() { return X_STATUS_SUCCESS; }
 
 X_RESULT WinKeyInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
                                             X_INPUT_CAPABILITIES* out_caps) {
-  if (user_index != 0) {
+  if (user_index != cvars::keyboard_user_index) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -123,7 +126,7 @@ X_RESULT WinKeyInputDriver::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
                                      X_INPUT_STATE* out_state) {
-  if (user_index != 0) {
+  if (user_index != cvars::keyboard_user_index) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -145,46 +148,49 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
           IsKeyDown(b.input_key)) {
         switch (b.output_key) {
           case ui::VirtualKey::kXInputPadA:
-            buttons |= 0x1000;  // XINPUT_GAMEPAD_A
+            buttons |= X_INPUT_GAMEPAD_A;
             break;
           case ui::VirtualKey::kXInputPadY:
-            buttons |= 0x8000;  // XINPUT_GAMEPAD_Y
+            buttons |= X_INPUT_GAMEPAD_Y;
             break;
           case ui::VirtualKey::kXInputPadB:
-            buttons |= 0x2000;  // XINPUT_GAMEPAD_B
+            buttons |= X_INPUT_GAMEPAD_B;
             break;
           case ui::VirtualKey::kXInputPadX:
-            buttons |= 0x4000;  // XINPUT_GAMEPAD_X
+            buttons |= X_INPUT_GAMEPAD_X;
+            break;
+          case ui::VirtualKey::kXInputPadGuide:
+            buttons |= X_INPUT_GAMEPAD_GUIDE;
             break;
           case ui::VirtualKey::kXInputPadDpadLeft:
-            buttons |= 0x0004;  // XINPUT_GAMEPAD_DPAD_LEFT
+            buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
             break;
           case ui::VirtualKey::kXInputPadDpadRight:
-            buttons |= 0x0008;  // XINPUT_GAMEPAD_DPAD_RIGHT
+            buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
             break;
           case ui::VirtualKey::kXInputPadDpadDown:
-            buttons |= 0x0002;  // XINPUT_GAMEPAD_DPAD_DOWN
+            buttons |= X_INPUT_GAMEPAD_DPAD_DOWN;
             break;
           case ui::VirtualKey::kXInputPadDpadUp:
-            buttons |= 0x0001;  // XINPUT_GAMEPAD_DPAD_UP
+            buttons |= X_INPUT_GAMEPAD_DPAD_UP;
             break;
           case ui::VirtualKey::kXInputPadRThumbPress:
-            buttons |= 0x0080;  // XINPUT_GAMEPAD_RIGHT_THUMB
+            buttons |= X_INPUT_GAMEPAD_RIGHT_THUMB;
             break;
           case ui::VirtualKey::kXInputPadLThumbPress:
-            buttons |= 0x0040;  // XINPUT_GAMEPAD_LEFT_THUMB
+            buttons |= X_INPUT_GAMEPAD_LEFT_THUMB;
             break;
           case ui::VirtualKey::kXInputPadBack:
-            buttons |= 0x0020;  // XINPUT_GAMEPAD_BACK
+            buttons |= X_INPUT_GAMEPAD_BACK;
             break;
           case ui::VirtualKey::kXInputPadStart:
-            buttons |= 0x0010;  // XINPUT_GAMEPAD_START
+            buttons |= X_INPUT_GAMEPAD_START;
             break;
           case ui::VirtualKey::kXInputPadLShoulder:
-            buttons |= 0x0100;  // XINPUT_GAMEPAD_LEFT_SHOULDER
+            buttons |= X_INPUT_GAMEPAD_LEFT_SHOULDER;
             break;
           case ui::VirtualKey::kXInputPadRShoulder:
-            buttons |= 0x0200;  // XINPUT_GAMEPAD_RIGHT_SHOULDER
+            buttons |= X_INPUT_GAMEPAD_RIGHT_SHOULDER;
             break;
           case ui::VirtualKey::kXInputPadLTrigger:
             left_trigger = 0xFF;
@@ -235,7 +241,7 @@ X_RESULT WinKeyInputDriver::GetState(uint32_t user_index,
 
 X_RESULT WinKeyInputDriver::SetState(uint32_t user_index,
                                      X_INPUT_VIBRATION* vibration) {
-  if (user_index != 0) {
+  if (user_index != cvars::keyboard_user_index) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
@@ -244,7 +250,7 @@ X_RESULT WinKeyInputDriver::SetState(uint32_t user_index,
 
 X_RESULT WinKeyInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
                                          X_INPUT_KEYSTROKE* out_keystroke) {
-  if (user_index != 0) {
+  if (user_index != cvars::keyboard_user_index) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 

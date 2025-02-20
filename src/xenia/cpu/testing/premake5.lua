@@ -5,13 +5,16 @@ test_suite("xenia-cpu-tests", project_root, ".", {
   links = {
     "capstone",
     "fmt",
+    "imgui",
     "xenia-base",
     "xenia-core",
     "xenia-cpu",
+    "xenia-gpu",
 
     -- TODO(benvanik): cut these dependencies?
     "xenia-kernel",
     "xenia-ui", -- needed by xenia-base
+    "xenia-patcher",
   },
   filtered_links = {
     {

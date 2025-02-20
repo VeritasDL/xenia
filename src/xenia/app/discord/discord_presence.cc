@@ -8,9 +8,11 @@
 */
 
 #include "discord_presence.h"
+#include <ctime>
 #include "third_party/discord-rpc/include/discord_rpc.h"
 #include "xenia/base/string.h"
 
+// TODO: This library has been deprecated in favor of Discord's GameSDK.
 namespace xe {
 namespace discord {
 
@@ -27,7 +29,7 @@ void DiscordPresence::Initialize() {
   handlers.joinGame = &HandleDiscordJoinGame;
   handlers.joinRequest = &HandleDiscordJoinRequest;
   handlers.spectateGame = &HandleDiscordSpectateGame;
-  Discord_Initialize("606840046649081857", &handlers, 0, "");
+  Discord_Initialize("1193272084797849762", &handlers, 0, "");
 }
 
 void DiscordPresence::NotPlaying() {
@@ -35,6 +37,8 @@ void DiscordPresence::NotPlaying() {
   discordPresence.state = "Idle";
   discordPresence.details = "Standby";
   discordPresence.largeImageKey = "app";
+  discordPresence.largeImageText = "Xenia Canary - Experimental Testing branch";
+  discordPresence.startTimestamp = time(0);
   discordPresence.instance = 1;
   Discord_UpdatePresence(&discordPresence);
 }
@@ -48,6 +52,8 @@ void DiscordPresence::PlayingTitle(const std::string_view game_title) {
   // discordPresence.smallImageKey = "app";
   // discordPresence.largeImageKey = "state_ingame";
   discordPresence.largeImageKey = "app";
+  discordPresence.largeImageText = "Xenia Canary - Experimental Testing branch";
+  discordPresence.startTimestamp = time(0);
   discordPresence.instance = 1;
   Discord_UpdatePresence(&discordPresence);
 }

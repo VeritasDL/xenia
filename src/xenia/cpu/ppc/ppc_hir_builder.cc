@@ -27,7 +27,7 @@
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/processor.h"
-
+#include "xenia/cpu/xex_module.h"
 DEFINE_bool(
     break_on_unimplemented_instructions, true,
     "Break to the host debugger (or crash if no debugger attached) if an "
@@ -89,6 +89,10 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
   function_ = function;
   start_address_ = function_->address();
+  // chrispy: i've seen this one happen, not sure why but i think from trying to
+  // precompile twice i've also seen ones with a start and end address that are
+  // the same...
+  assert_true(function_->address() <= function_->end_address());
   instr_count_ = (function_->end_address() - function_->address()) / 4 + 1;
 
   with_debug_info_ = (flags & EMIT_DEBUG_COMMENTS) == EMIT_DEBUG_COMMENTS;
@@ -242,6 +246,8 @@ void PPCHIRBuilder::MaybeBreakOnInstruction(uint32_t address) {
 }
 
 void PPCHIRBuilder::AnnotateLabel(uint32_t address, Label* label) {
+  // chrispy: label->name is unused, it would be nice to be able to remove the
+  // field and this code
   char name_buffer[13];
   auto format_result = fmt::format_to_n(name_buffer, 12, "loc_{:08X}", address);
   name_buffer[format_result.size] = '\0';
@@ -418,6 +424,10 @@ void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   // Testing for all 1's and all 0's.
   // if (Rc) CR6 = all_equal | 0 | none_equal | 0
   // TODO(benvanik): efficient instruction?
+
+  // chrispy: nothing seems to write cr6_1, figure out if no documented
+  // instructions write anything other than 0 to it and remove these stores if
+  // so
   StoreContext(offsetof(PPCContext, cr6.cr6_1), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_3), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_all_equal),
@@ -443,6 +453,14 @@ void PPCHIRBuilder::StoreFPSCR(Value* value) {
 void PPCHIRBuilder::UpdateFPSCR(Value* result, bool update_cr1) {
   // TODO(benvanik): detect overflow and nan cases.
   // fx and vx are the most important.
+  /*
+    chrispy: i stubbed this out at one point because all it does is waste
+     memory and CPU time, however, this introduced issues with raiden
+    (substitute w/ titleid later) which probably means they stash stuff in the
+    fpscr?
+
+  */
+
   Value* fx = LoadConstantInt8(0);
   Value* fex = LoadConstantInt8(0);
   Value* vx = LoadConstantInt8(0);
@@ -567,7 +585,26 @@ void PPCHIRBuilder::StoreReserved(Value* val) {
 Value* PPCHIRBuilder::LoadReserved() {
   return LoadContext(offsetof(PPCContext, reserved_val), INT64_TYPE);
 }
+void PPCHIRBuilder::SetReturnAddress(Value* value) {
+  /*
+     Record the address as being a possible target of a return. This is
+     needed for longjmp emulation. See x64_emitter.cc's ResolveFunction
+  */
+  Module* mod = this->function_->module();
+  if (value && value->IsConstant()) {
+    if (mod) {
+      XexModule* xexmod = dynamic_cast<XexModule*>(mod);
+      if (xexmod) {
+        auto flags = xexmod->GetInstructionAddressFlags(value->AsUint32());
+        if (flags) {
+          flags->is_return_site = true;
+        }
+      }
+    }
+  }
 
+  HIRBuilder::SetReturnAddress(value);
+}
 }  // namespace ppc
 }  // namespace cpu
 }  // namespace xe

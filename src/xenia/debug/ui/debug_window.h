@@ -33,7 +33,7 @@ namespace ui {
 
 class DebugWindow : public cpu::DebugListener {
  public:
-  ~DebugWindow();
+  virtual ~DebugWindow();
 
   static std::unique_ptr<DebugWindow> Create(
       Emulator* emulator, xe::ui::WindowedAppContext& app_context);
@@ -44,12 +44,14 @@ class DebugWindow : public cpu::DebugListener {
 
   void OnFocus() override;
   void OnDetached() override;
+  void OnUnhandledException(Exception* ex) override;
   void OnExecutionPaused() override;
   void OnExecutionContinued() override;
   void OnExecutionEnded() override;
   void OnStepCompleted(cpu::ThreadDebugInfo* thread_info) override;
   void OnBreakpointHit(cpu::Breakpoint* breakpoint,
                        cpu::ThreadDebugInfo* thread_info) override;
+  void OnDebugPrint(const std::string_view message) override;
 
  private:
   class DebugDialog final : public xe::ui::ImGuiDialog {

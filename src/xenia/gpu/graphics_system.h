@@ -34,6 +34,13 @@ class Emulator;
 namespace xe {
 namespace gpu {
 
+static const std::vector<std::pair<uint16_t, uint16_t>>
+    internal_display_resolution_entries = {
+        {640, 480},  {640, 576},   {720, 480},  {720, 576},  {800, 600},
+        {848, 480},  {1024, 768},  {1152, 864}, {1280, 720}, {1280, 768},
+        {1280, 960}, {1280, 1024}, {1360, 768}, {1440, 900}, {1680, 1050},
+        {1920, 540}, {1920, 1080}};
+
 class CommandProcessor;
 
 class GraphicsSystem {
@@ -58,7 +65,7 @@ class GraphicsSystem {
   // from a device loss.
   void OnHostGpuLossFromAnyThread(bool is_responsible);
 
-  RegisterFile* register_file() { return &register_file_; }
+  RegisterFile* register_file() { return register_file_; }
   CommandProcessor* command_processor() const {
     return command_processor_.get();
   }
@@ -86,6 +93,16 @@ class GraphicsSystem {
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 
+  static std::pair<uint16_t, uint16_t> GetInternalDisplayResolution();
+
+  std::pair<uint32_t, uint32_t> GetScaledAspectRatio() const {
+    return {scaled_aspect_x_, scaled_aspect_y_};
+  };
+  void SetScaledAspectRatio(uint32_t x, uint32_t y) {
+    scaled_aspect_x_ = x;
+    scaled_aspect_y_ = y;
+  };
+
  protected:
   GraphicsSystem();
 
@@ -109,13 +126,16 @@ class GraphicsSystem {
   uint32_t interrupt_callback_ = 0;
   uint32_t interrupt_callback_data_ = 0;
 
-  std::atomic<bool> vsync_worker_running_;
-  kernel::object_ref<kernel::XHostThread> vsync_worker_thread_;
+  std::atomic<bool> frame_limiter_worker_running_;
+  kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
 
-  RegisterFile register_file_;
+  RegisterFile* register_file_;
   std::unique_ptr<CommandProcessor> command_processor_;
 
   bool paused_ = false;
+
+  uint32_t scaled_aspect_x_ = 0;
+  uint32_t scaled_aspect_y_ = 0;
 
  private:
   std::unique_ptr<ui::Presenter> presenter_;

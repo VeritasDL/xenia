@@ -25,8 +25,10 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
+#include "xenia/debug/gdb/gdbstub.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
@@ -89,18 +91,26 @@ DEFINE_path(
     "Storage");
 
 DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
-DEFINE_bool(mount_cache, false, "Enable cache mount", "Storage");
+
+DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
 
 DEFINE_transient_path(target, "",
                       "Specifies the target .xex or .iso to execute.",
                       "General");
-DEFINE_transient_bool(portable, false,
+DEFINE_transient_bool(portable, true,
                       "Specifies if Xenia should run in portable mode.",
                       "General");
 
 DECLARE_bool(debug);
+DEFINE_int32(
+    gdbport, 0,
+    "Port for GDBStub debugger to listen on, requires --debug (0 = disable)",
+    "General");
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
+
+DECLARE_bool(widescreen);
 
 namespace xe {
 namespace app {
@@ -225,6 +235,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
 
   // Created on demand, used by the emulator.
   std::unique_ptr<xe::debug::ui::DebugWindow> debug_window_;
+  std::unique_ptr<xe::debug::gdb::GDBStub> debug_gdbstub_;
 
   // Refreshing the emulator - placed after its dependencies.
   std::atomic<bool> emulator_thread_quit_requested_;
@@ -379,6 +390,9 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
 }
 
 bool EmulatorApp::OnInitialize() {
+#if XE_ARCH_AMD64 == 1
+  amd64::InitFeatureFlags();
+#endif
   Profiler::Initialize();
   Profiler::ThreadEnter("Main");
 
@@ -419,7 +433,7 @@ bool EmulatorApp::OnInitialize() {
 
   std::filesystem::path cache_root = cvars::cache_root;
   if (cache_root.empty()) {
-    cache_root = storage_root / "cache";
+    cache_root = storage_root / "cache_host";
     // TODO(Triang3l): Point to the app's external storage "cache" directory on
     // Android.
   } else {
@@ -430,7 +444,7 @@ bool EmulatorApp::OnInitialize() {
     }
   }
   cache_root = std::filesystem::absolute(cache_root);
-  XELOGI("Cache root: {}", xe::path_to_utf8(cache_root));
+  XELOGI("Host cache root: {}", xe::path_to_utf8(cache_root));
 
   if (cvars::discord) {
     discord::DiscordPresence::Initialize();
@@ -441,8 +455,12 @@ bool EmulatorApp::OnInitialize() {
   emulator_ =
       std::make_unique<Emulator>("", storage_root, content_root, cache_root);
 
+  // Determine window size based on user setting.
+  auto res = xe::gpu::GraphicsSystem::GetInternalDisplayResolution();
+
   // Main emulator display window.
-  emulator_window_ = EmulatorWindow::Create(emulator_.get(), app_context());
+  emulator_window_ = EmulatorWindow::Create(emulator_.get(), app_context(),
+                                            res.first, res.second);
   if (!emulator_window_) {
     XELOGE("Failed to create the main emulator window");
     return false;
@@ -556,20 +574,33 @@ void EmulatorApp::EmulatorThread() {
   // Set a debug handler.
   // This will respond to debugging requests so we can open the debug UI.
   if (cvars::debug) {
-    emulator_->processor()->set_debug_listener_request_handler(
-        [this](xe::cpu::Processor* processor) {
-          if (debug_window_) {
-            return debug_window_.get();
-          }
-          app_context().CallInUIThreadSynchronous([this]() {
-            debug_window_ = xe::debug::ui::DebugWindow::Create(emulator_.get(),
-                                                               app_context());
-            debug_window_->window()->AddListener(
-                &debug_window_closed_listener_);
+    if (cvars::gdbport > 0) {
+      emulator_->processor()->set_debug_listener_request_handler(
+          [this](xe::cpu::Processor* processor) {
+            if (debug_gdbstub_) {
+              return debug_gdbstub_.get();
+            }
+            debug_gdbstub_ = xe::debug::gdb::GDBStub::Create(emulator_.get(),
+                                                             cvars::gdbport);
+            return debug_gdbstub_.get();
           });
-          // If failed to enqueue the UI thread call, this will just be null.
-          return debug_window_.get();
-        });
+      emulator_->processor()->ShowDebugger();
+    } else {
+      emulator_->processor()->set_debug_listener_request_handler(
+          [this](xe::cpu::Processor* processor) {
+            if (debug_window_) {
+              return debug_window_.get();
+            }
+            app_context().CallInUIThreadSynchronous([this]() {
+              debug_window_ = xe::debug::ui::DebugWindow::Create(
+                  emulator_.get(), app_context());
+              debug_window_->window()->AddListener(
+                  &debug_window_closed_listener_);
+            });
+            // If failed to enqueue the UI thread call, this will just be null.
+            return debug_window_.get();
+          });
+    }
   }
 
   emulator_->on_launch.AddListener([&](auto title_id, const auto& game_title) {
@@ -587,6 +618,10 @@ void EmulatorApp::EmulatorThread() {
           emulator_window_->SetInitializingShaderStorage(initializing);
         });
       });
+
+  emulator_->on_patch_apply.AddListener([this]() {
+    app_context().CallInUIThread([this]() { emulator_window_->UpdateTitle(); });
+  });
 
   emulator_->on_terminate.AddListener([]() {
     if (cvars::discord) {
@@ -607,7 +642,9 @@ void EmulatorApp::EmulatorThread() {
   if (!path.empty()) {
     // Normalize the path and make absolute.
     auto abs_path = std::filesystem::absolute(path);
-    result = emulator_->LaunchPath(abs_path);
+
+    result = app_context().CallInUIThread(
+        [this, abs_path]() { return emulator_window_->RunTitle(abs_path); });
     if (XFAILED(result)) {
       xe::FatalError(fmt::format("Failed to launch target: {:08X}", result));
       app_context().RequestDeferredQuit();
@@ -615,17 +652,24 @@ void EmulatorApp::EmulatorThread() {
     }
   }
 
+  auto xam = emulator_->kernel_state()->GetKernelModule<kernel::xam::XamModule>(
+      "xam.xex");
+
+  if (xam) {
+    xam->LoadLoaderData();
+
+    if (xam->loader_data().launch_data_present) {
+      const std::filesystem::path host_path = xam->loader_data().host_path;
+      app_context().CallInUIThread([this, host_path]() {
+        return emulator_window_->RunTitle(host_path);
+      });
+    }
+  }
+
   // Now, we're going to use this thread to drive events related to emulation.
   while (!emulator_thread_quit_requested_.load(std::memory_order_relaxed)) {
     xe::threading::Wait(emulator_thread_event_.get(), false);
-    while (true) {
-      emulator_->WaitUntilExit();
-      if (emulator_->TitleRequested()) {
-        emulator_->LaunchNextTitle();
-      } else {
-        break;
-      }
-    }
+    emulator_->WaitUntilExit();
   }
 }
 

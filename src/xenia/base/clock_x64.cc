@@ -45,6 +45,7 @@ namespace xe {
 // Getting the TSC frequency can be a bit tricky. This method here only works on
 // Intel as it seems. There is no easy way to get the frequency outside of ring0
 // on AMD, so we fail gracefully if not possible.
+XE_NOINLINE
 uint64_t Clock::host_tick_frequency_raw() {
   uint32_t eax, ebx, ecx, edx;
 
@@ -95,7 +96,7 @@ uint64_t Clock::host_tick_frequency_raw() {
   CLOCK_FATAL("The clock frequency could not be determined.");
   return 0;
 }
-
+XE_NOINLINE
 uint64_t Clock::host_tick_count_raw() { return xe_cpu_rdtsc(); }
 
 }  // namespace xe

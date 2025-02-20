@@ -42,9 +42,6 @@
 #include "xenia/ui/windowed_app_context.h"
 #include "xenia/xbox.h"
 
-DEFINE_string(target_trace_file, "", "Specifies the trace file to load.",
-              "GPU");
-
 namespace xe {
 namespace gpu {
 
@@ -67,7 +64,7 @@ TraceViewer::TraceViewer(xe::ui::WindowedAppContext& app_context,
 TraceViewer::~TraceViewer() = default;
 
 bool TraceViewer::OnInitialize() {
-  std::string path = cvars::target_trace_file;
+  std::string path = cvars::target_trace_file.u8string();
 
   // If no path passed, ask the user.
   // On Android, however, there's no synchronous file picker, and the trace file
@@ -746,7 +743,7 @@ void TraceViewer::DrawTextureInfo(
   ImGui::NextColumn();
   ImGui::Text("Fetch Slot: %u", texture_binding.fetch_constant);
   ImGui::Text("Guest Address: %.8X", texture_info.memory.base_address);
-  ImGui::Text("Format: %s", texture_info.format_info()->name);
+  ImGui::Text("Format: %s", texture_info.format_name());
   switch (texture_info.dimension) {
     case xenos::DataDimension::k1D:
       ImGui::Text("1D: %dpx", texture_info.width + 1);
@@ -902,11 +899,9 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
         } break;
         case xenos::VertexFormat::k_16_16_FLOAT: {
           auto e0 = LOADEL(uint32_t, 0);
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e0 >> 16) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e0 >> 16) & 0xFFFF));
           ImGui::NextColumn();
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e0 >> 0) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e0 >> 0) & 0xFFFF));
           ImGui::NextColumn();
         } break;
         case xenos::VertexFormat::k_32_32:
@@ -943,7 +938,6 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
           ImGui::NextColumn();
           break;
         case xenos::VertexFormat::k_2_10_10_10: {
-          auto e0 = LOADEL(uint32_t, 0);
           ImGui::Text("??");
           ImGui::NextColumn();
           ImGui::Text("??");
@@ -978,17 +972,13 @@ void TraceViewer::DrawVertexFetcher(Shader* shader,
         case xenos::VertexFormat::k_16_16_16_16_FLOAT: {
           auto e0 = LOADEL(uint32_t, 0);
           auto e1 = LOADEL(uint32_t, 1);
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e0 >> 16) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e0 >> 16) & 0xFFFF));
           ImGui::NextColumn();
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e0 >> 0) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e0 >> 0) & 0xFFFF));
           ImGui::NextColumn();
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e1 >> 16) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e1 >> 16) & 0xFFFF));
           ImGui::NextColumn();
-          ImGui::Text("%.2f",
-                      half_float::detail::half2float((e1 >> 0) & 0xFFFF));
+          ImGui::Text("%.2f", half_float::detail::uint16((e1 >> 0) & 0xFFFF));
           ImGui::NextColumn();
         } break;
         case xenos::VertexFormat::k_32_32_32_32_FLOAT:
@@ -1068,8 +1058,6 @@ void ProgressBar(float frac, float width, float height = 0,
   }
   frac = xe::saturate(frac);
 
-  const auto fontAtlas = ImGui::GetIO().Fonts;
-
   auto pos = ImGui::GetCursorScreenPos();
   auto col = ImGui::ColorConvertFloat4ToU32(color);
   auto border_col = ImGui::ColorConvertFloat4ToU32(border_color);
@@ -1139,7 +1127,6 @@ void TraceViewer::DrawStateUI() {
   std::memset(&draw_info, 0, sizeof(draw_info));
   switch (opcode) {
     case PM4_DRAW_INDX: {
-      uint32_t dword0 = xe::load_and_swap<uint32_t>(packet_head + 4);
       uint32_t dword1 = xe::load_and_swap<uint32_t>(packet_head + 8);
       draw_info.index_count = dword1 >> 16;
       draw_info.prim_type = static_cast<xenos::PrimitiveType>(dword1 & 0x3F);
@@ -1189,7 +1176,6 @@ void TraceViewer::DrawStateUI() {
   auto enable_mode =
       static_cast<ModeControl>(regs[XE_GPU_REG_RB_MODECONTROL] & 0x7);
 
-  const char* mode_name = "Unknown";
   switch (enable_mode) {
     case ModeControl::kIgnore:
       ImGui::Text("Ignored Command %d", player_->current_command_index());

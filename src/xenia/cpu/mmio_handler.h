@@ -29,7 +29,8 @@ typedef uint32_t (*MMIOReadCallback)(void* ppc_context, void* callback_context,
                                      uint32_t addr);
 typedef void (*MMIOWriteCallback)(void* ppc_context, void* callback_context,
                                   uint32_t addr, uint32_t value);
-
+typedef void (*MmioAccessRecordCallback)(void* context,
+                                         void* host_insn_address);
 struct MMIORange {
   uint32_t address;
   uint32_t mask;
@@ -47,7 +48,9 @@ class MMIOHandler {
   typedef uint32_t (*HostToGuestVirtual)(const void* context,
                                          const void* host_address);
   typedef bool (*AccessViolationCallback)(
-      std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+      global_unique_lock_type
+          global_lock_locked_once,  // not passed by reference with const like
+                                    // the others?
       void* context, void* host_address, bool is_write);
 
   // access_violation_callback is called with global_critical_region locked once
@@ -58,7 +61,8 @@ class MMIOHandler {
       HostToGuestVirtual host_to_guest_virtual,
       const void* host_to_guest_virtual_context,
       AccessViolationCallback access_violation_callback,
-      void* access_violation_callback_context);
+      void* access_violation_callback_context,
+      MmioAccessRecordCallback record_mmio_callback, void* record_mmio_context);
   static MMIOHandler* global_handler() { return global_handler_; }
 
   bool RegisterRange(uint32_t virtual_address, uint32_t mask, uint32_t size,
@@ -68,13 +72,20 @@ class MMIOHandler {
 
   bool CheckLoad(uint32_t virtual_address, uint32_t* out_value);
   bool CheckStore(uint32_t virtual_address, uint32_t value);
+  void SetMMIOExceptionRecordingCallback(MmioAccessRecordCallback callback,
+                                         void* context) {
+    record_mmio_context_ = context;
+    record_mmio_callback_ = callback;
+  }
 
  protected:
   MMIOHandler(uint8_t* virtual_membase, uint8_t* physical_membase,
               uint8_t* membase_end, HostToGuestVirtual host_to_guest_virtual,
               const void* host_to_guest_virtual_context,
               AccessViolationCallback access_violation_callback,
-              void* access_violation_callback_context);
+              void* access_violation_callback_context,
+              MmioAccessRecordCallback record_mmio_callback,
+              void* record_mmio_context);
 
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
@@ -90,7 +101,9 @@ class MMIOHandler {
 
   AccessViolationCallback access_violation_callback_;
   void* access_violation_callback_context_;
+  MmioAccessRecordCallback record_mmio_callback_;
 
+  void* record_mmio_context_;
   static MMIOHandler* global_handler_;
 
   xe::global_critical_region global_critical_region_;

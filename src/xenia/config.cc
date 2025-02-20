@@ -9,7 +9,6 @@
 
 #include "config.h"
 
-#include "third_party/cpptoml/include/cpptoml.h"
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
@@ -18,23 +17,8 @@
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 
-std::shared_ptr<cpptoml::table> ParseFile(
-    const std::filesystem::path& filename) {
-  std::ifstream file(filename);
-  if (!file.is_open()) {
-    throw cpptoml::parse_exception(xe::path_to_utf8(filename) +
-                                   " could not be opened for parsing");
-  }
-  // since cpptoml can't parse files with a UTF-8 BOM we need to skip them
-  char bom[3];
-  file.read(bom, sizeof(bom));
-  if (file.fail() || bom[0] != '\xEF' || bom[1] != '\xBB' || bom[2] != '\xBF') {
-    file.clear();
-    file.seekg(0);
-  }
-
-  cpptoml::parser p(file);
-  return p.parse();
+toml::parse_result ParseFile(const std::filesystem::path& filename) {
+  return toml::parse_file(xe::path_to_utf8(filename));
 }
 
 CmdVar(config, "", "Specifies the target config to load.");
@@ -46,20 +30,60 @@ DEFINE_uint32(
     "Config");
 
 namespace config {
-std::string config_name = "xenia.config.toml";
+std::string config_name = "xenia-canary.config.toml";
 std::filesystem::path config_folder;
 std::filesystem::path config_path;
 std::string game_config_suffix = ".config.toml";
 
-std::shared_ptr<cpptoml::table> ParseConfig(
-    const std::filesystem::path& config_path) {
+bool sortCvar(cvar::IConfigVar* a, cvar::IConfigVar* b) {
+  if (a->category() < b->category()) return true;
+  if (a->category() > b->category()) return false;
+  if (a->name() < b->name()) return true;
+  return false;
+}
+
+toml::parse_result ParseConfig(const std::filesystem::path& config_path) {
   try {
     return ParseFile(config_path);
-  } catch (cpptoml::parse_exception e) {
+  } catch (toml::parse_error& e) {
     xe::FatalError(fmt::format("Failed to parse config file '{}':\n\n{}",
                                xe::path_to_utf8(config_path), e.what()));
-    return nullptr;
+    return toml::parse_result();
   }
+}
+
+void PrintConfigToLog(const std::filesystem::path& file_path) {
+  std::ifstream file(file_path);
+  if (!file.is_open()) {
+    return;
+  }
+
+  std::string config_dump = "----------- CONFIG DUMP -----------\n";
+  std::string config_line = "";
+  while (std::getline(file, config_line)) {
+    if (config_line.empty()) {
+      continue;
+    }
+
+    // Find place where comment begins and cut that part.
+    const size_t comment_mark_position = config_line.find_first_of("#");
+    if (comment_mark_position != std::string::npos) {
+      config_line.erase(comment_mark_position, config_line.length());
+    }
+
+    // Check if remaining part of line is empty.
+    if (std::all_of(config_line.cbegin(), config_line.cend(), isspace)) {
+      continue;
+    }
+    // Check if line is a category mark. If it is add new line on start for
+    // improved visibility.
+    const bool category_mark = config_line.at(0) == '[';
+    config_dump += (category_mark ? "\n" : "") + config_line + "\n";
+  }
+  config_dump += "----------- END OF CONFIG DUMP ----";
+  XELOGI("{}", config_dump);
+
+  file.close();
 }
 
 void ReadConfig(const std::filesystem::path& file_path,
@@ -67,7 +91,11 @@ void ReadConfig(const std::filesystem::path& file_path,
   if (!cvar::ConfigVars) {
     return;
   }
+
   const auto config = ParseConfig(file_path);
+
+  PrintConfigToLog(file_path);
+
   // Loading an actual global config file that exists - if there's no
   // defaults_date in it, it's very old (before updating was added at all, thus
   // all defaults need to be updated).
@@ -77,15 +105,19 @@ void ReadConfig(const std::filesystem::path& file_path,
   defaults_date_cvar->SetConfigValue(0);
   for (auto& it : *cvar::ConfigVars) {
     auto config_var = static_cast<cvar::IConfigVar*>(it.second);
-    auto config_key = config_var->category() + "." + config_var->name();
-    if (config->contains_qualified(config_key)) {
-      config_var->LoadConfigValue(config->get_qualified(config_key));
+    toml::path config_key =
+        toml::path(config_var->category() + "." + config_var->name());
+
+    const auto config_key_node = config.at_path(config_key);
+    if (config_key_node) {
+      config_var->LoadConfigValue(config_key_node.node());
     }
   }
   uint32_t config_defaults_date = defaults_date_cvar->GetTypedConfigValue();
   if (update_if_no_version_stored || config_defaults_date) {
     cvar::IConfigVarUpdate::ApplyUpdates(config_defaults_date);
   }
+
   XELOGI("Loaded config: {}", xe::path_to_utf8(file_path));
 }
 
@@ -96,9 +128,12 @@ void ReadGameConfig(const std::filesystem::path& file_path) {
   const auto config = ParseConfig(file_path);
   for (auto& it : *cvar::ConfigVars) {
     auto config_var = static_cast<cvar::IConfigVar*>(it.second);
-    auto config_key = config_var->category() + "." + config_var->name();
-    if (config->contains_qualified(config_key)) {
-      config_var->LoadGameConfigValue(config->get_qualified(config_key));
+    toml::path config_key =
+        toml::path(config_var->category() + "." + config_var->name());
+
+    const auto config_key_node = config.at_path(config_key);
+    if (config_key_node) {
+      config_var->LoadConfigValue(config_key_node.node());
     }
   }
   XELOGI("Loaded game config: {}", xe::path_to_utf8(file_path));

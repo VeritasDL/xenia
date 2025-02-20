@@ -175,6 +175,27 @@ bool Processor::AddModule(std::unique_ptr<Module> module) {
   return true;
 }
 
+void Processor::RemoveModule(const std::string_view name) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  auto itr =
+      std::find_if(modules_.cbegin(), modules_.cend(),
+                   [name](std::unique_ptr<xe::cpu::Module> const& module) {
+                     return module->name() == name;
+                   });
+
+  if (itr != modules_.cend()) {
+    const std::vector<uint32_t> addressed_functions =
+        (*itr)->GetAddressedFunctions();
+
+    modules_.erase(itr);
+
+    for (const uint32_t entry : addressed_functions) {
+      RemoveFunctionByAddress(entry);
+    }
+  }
+}
+
 Module* Processor::GetModule(const std::string_view name) {
   auto global_lock = global_critical_region_.Acquire();
   for (const auto& module : modules_) {
@@ -224,6 +245,10 @@ std::vector<Function*> Processor::FindFunctionsWithAddress(uint32_t address) {
   return entry_table_.FindWithAddress(address);
 }
 
+void Processor::RemoveFunctionByAddress(uint32_t address) {
+  entry_table_.Delete(address);
+}
+
 Function* Processor::ResolveFunction(uint32_t address) {
   Entry* entry;
   Entry::Status status = entry_table_.GetOrCreate(address, &entry);
@@ -232,6 +257,7 @@ Function* Processor::ResolveFunction(uint32_t address) {
 
     // Grab symbol declaration.
     auto function = LookupFunction(address);
+
     if (!function) {
       entry->status = Entry::STATUS_FAILED;
       return nullptr;
@@ -241,6 +267,17 @@ Function* Processor::ResolveFunction(uint32_t address) {
       entry->status = Entry::STATUS_FAILED;
       return nullptr;
     }
+    // only add it to the list of resolved functions if resolving succeeded
+    auto module_for = function->module();
+
+    auto xexmod = dynamic_cast<XexModule*>(module_for);
+    if (xexmod) {
+      auto addr_flags = xexmod->GetInstructionAddressFlags(address);
+      if (addr_flags) {
+        addr_flags->was_resolved = 1;
+      }
+    }
+
     entry->function = function;
     entry->end_address = function->end_address();
     status = entry->status = Entry::STATUS_READY;
@@ -253,23 +290,23 @@ Function* Processor::ResolveFunction(uint32_t address) {
     return nullptr;
   }
 }
-
+Module* Processor::LookupModule(uint32_t address) {
+  auto global_lock = global_critical_region_.Acquire();
+  // TODO(benvanik): sort by code address (if contiguous) so can bsearch.
+  // TODO(benvanik): cache last module low/high, as likely to be in there.
+  for (const auto& module : modules_) {
+    if (module->ContainsAddress(address)) {
+      return module.get();
+    }
+  }
+  return nullptr;
+}
 Function* Processor::LookupFunction(uint32_t address) {
   // TODO(benvanik): fast reject invalid addresses/log errors.
 
   // Find the module that contains the address.
-  Module* code_module = nullptr;
-  {
-    auto global_lock = global_critical_region_.Acquire();
-    // TODO(benvanik): sort by code address (if contiguous) so can bsearch.
-    // TODO(benvanik): cache last module low/high, as likely to be in there.
-    for (const auto& module : modules_) {
-      if (module->ContainsAddress(address)) {
-        code_module = module.get();
-        break;
-      }
-    }
-  }
+  Module* code_module = LookupModule(address);
+
   if (!code_module) {
     // No module found that could contain the address.
     return nullptr;
@@ -395,50 +432,6 @@ uint64_t Processor::Execute(ThreadState* thread_state, uint32_t address,
   return context->r[3];
 }
 
-uint64_t Processor::ExecuteInterrupt(ThreadState* thread_state,
-                                     uint32_t address, uint64_t args[],
-                                     size_t arg_count) {
-  SCOPE_profile_cpu_f("cpu");
-
-  // Hold the global lock during interrupt dispatch.
-  // This will block if any code is in a critical region (has interrupts
-  // disabled) or if any other interrupt is executing.
-  auto global_lock = global_critical_region_.Acquire();
-
-  auto context = thread_state->context();
-  assert_true(arg_count <= 5);
-  for (size_t i = 0; i < arg_count; ++i) {
-    context->r[3 + i] = args[i];
-  }
-
-  // TLS ptr must be zero during interrupts. Some games check this and
-  // early-exit routines when under interrupts.
-  auto pcr_address =
-      memory_->TranslateVirtual(static_cast<uint32_t>(context->r[13]));
-  uint32_t old_tls_ptr = xe::load_and_swap<uint32_t>(pcr_address);
-  xe::store_and_swap<uint32_t>(pcr_address, 0);
-
-  if (!Execute(thread_state, address)) {
-    return 0xDEADBABE;
-  }
-
-  // Restores TLS ptr.
-  xe::store_and_swap<uint32_t>(pcr_address, old_tls_ptr);
-
-  return context->r[3];
-}
-
-Irql Processor::RaiseIrql(Irql new_value) {
-  return static_cast<Irql>(
-      xe::atomic_exchange(static_cast<uint32_t>(new_value),
-                          reinterpret_cast<volatile uint32_t*>(&irql_)));
-}
-
-void Processor::LowerIrql(Irql old_value) {
-  xe::atomic_exchange(static_cast<uint32_t>(old_value),
-                      reinterpret_cast<volatile uint32_t*>(&irql_));
-}
-
 bool Processor::Save(ByteStream* stream) {
   stream->Write(kProcessorSaveSignature);
   return true;
@@ -454,6 +447,7 @@ bool Processor::Restore(ByteStream* stream) {
   std::vector<uint32_t> to_delete;
   for (auto& it : thread_debug_infos_) {
     if (it.second->state == ThreadDebugInfo::State::kZombie) {
+      it.second->thread_handle = NULL;
       to_delete.push_back(it.first);
     }
   }
@@ -488,11 +482,11 @@ void Processor::OnThreadCreated(uint32_t thread_handle,
                                 ThreadState* thread_state, Thread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   auto thread_info = std::make_unique<ThreadDebugInfo>();
-  thread_info->thread_handle = thread_handle;
   thread_info->thread_id = thread_state->thread_id();
   thread_info->thread = thread;
   thread_info->state = ThreadDebugInfo::State::kAlive;
   thread_info->suspended = false;
+  thread_info->thread_handle = thread_handle;
   thread_debug_infos_.emplace(thread_info->thread_id, std::move(thread_info));
 }
 
@@ -508,9 +502,8 @@ void Processor::OnThreadDestroyed(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
   assert_true(it != thread_debug_infos_.end());
-  auto thread_info = it->second.get();
-  thread_info->state = ThreadDebugInfo::State::kZombie;
-  thread_info->thread = nullptr;
+  it->second->thread_handle = NULL;
+  thread_debug_infos_.erase(it);
 }
 
 void Processor::OnThreadEnteringWait(uint32_t thread_id) {
@@ -651,7 +644,8 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
       if ((scan_breakpoint->address_type() == Breakpoint::AddressType::kGuest &&
            scan_breakpoint->guest_address() == frame.guest_pc) ||
           (scan_breakpoint->address_type() == Breakpoint::AddressType::kHost &&
-           scan_breakpoint->host_address() == frame.host_pc)) {
+           scan_breakpoint->host_address() == frame.host_pc) ||
+          scan_breakpoint->ContainsHostAddress(frame.host_pc)) {
         breakpoint = scan_breakpoint;
         break;
       }
@@ -676,7 +670,7 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
     debug_listener_->OnExecutionPaused();
   }
 
-  thread_info->thread->thread()->Suspend();
+  ResumeAllThreads();
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
@@ -687,6 +681,8 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
 #else
 #error Instruction pointer not specified for the target CPU architecture.
 #endif  // XE_ARCH
+
+  thread_info->thread->thread()->Suspend();
 
   // Resume execution.
   return true;
@@ -728,7 +724,7 @@ bool Processor::OnUnhandledException(Exception* ex) {
   execution_state_ = ExecutionState::kPaused;
 
   // Notify debugger that exceution stopped.
-  // debug_listener_->OnException(info);
+  debug_listener_->OnUnhandledException(ex);
   debug_listener_->OnExecutionPaused();
 
   // Suspend self.
@@ -911,6 +907,7 @@ void Processor::Continue() {
   execution_state_ = ExecutionState::kRunning;
   ResumeAllBreakpoints();
   ResumeAllThreads();
+
   if (debug_listener_) {
     debug_listener_->OnExecutionContinued();
   }
@@ -941,7 +938,10 @@ void Processor::StepHostInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-  AddBreakpoint(thread_info->step_breakpoint.get());
+
+  // Add to front of breakpoints map, so this should get evaluated first
+  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
+
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();
@@ -974,7 +974,10 @@ void Processor::StepGuestInstruction(uint32_t thread_id) {
                        thread_info->step_breakpoint.reset();
                        OnStepCompleted(thread_info);
                      }));
-  AddBreakpoint(thread_info->step_breakpoint.get());
+
+  // Add to front of breakpoints map, so this should get evaluated first
+  breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
+
   thread_info->step_breakpoint->Resume();
 
   // ResumeAllBreakpoints();
@@ -1300,6 +1303,62 @@ uint32_t Processor::CalculateNextGuestInstruction(ThreadDebugInfo* thread_info,
     return current_pc + 4;
   }
 }
+uint32_t Processor::GuestAtomicIncrement32(ppc::PPCContext* context,
+                                           uint32_t guest_address) {
+  uint32_t* host_address = context->TranslateVirtual<uint32_t*>(guest_address);
 
+  uint32_t result;
+  while (true) {
+    result = *host_address;
+    // todo: should call a processor->backend function that acquires a
+    // reservation instead of using host atomics
+    if (xe::atomic_cas(result, xe::byte_swap(xe::byte_swap(result) + 1),
+                       host_address)) {
+      break;
+    }
+  }
+  return xe::byte_swap(result);
+}
+uint32_t Processor::GuestAtomicDecrement32(ppc::PPCContext* context,
+                                           uint32_t guest_address) {
+  uint32_t* host_address = context->TranslateVirtual<uint32_t*>(guest_address);
+
+  uint32_t result;
+  while (true) {
+    result = *host_address;
+    // todo: should call a processor->backend function that acquires a
+    // reservation instead of using host atomics
+    if (xe::atomic_cas(result, xe::byte_swap(xe::byte_swap(result) - 1),
+                       host_address)) {
+      break;
+    }
+  }
+  return xe::byte_swap(result);
+}
+
+uint32_t Processor::GuestAtomicOr32(ppc::PPCContext* context,
+                                    uint32_t guest_address, uint32_t mask) {
+  return xe::byte_swap(
+      xe::atomic_or(context->TranslateVirtual<volatile int32_t*>(guest_address),
+                    xe::byte_swap(mask)));
+}
+uint32_t Processor::GuestAtomicXor32(ppc::PPCContext* context,
+                                     uint32_t guest_address, uint32_t mask) {
+  return xe::byte_swap(xe::atomic_xor(
+      context->TranslateVirtual<volatile int32_t*>(guest_address),
+      xe::byte_swap(mask)));
+}
+uint32_t Processor::GuestAtomicAnd32(ppc::PPCContext* context,
+                                     uint32_t guest_address, uint32_t mask) {
+  return xe::byte_swap(xe::atomic_and(
+      context->TranslateVirtual<volatile int32_t*>(guest_address),
+      xe::byte_swap(mask)));
+}
+
+bool Processor::GuestAtomicCAS32(ppc::PPCContext* context, uint32_t old_value,
+                                 uint32_t new_value, uint32_t guest_address) {
+  return xe::atomic_cas(xe::byte_swap(old_value), xe::byte_swap(new_value),
+                        context->TranslateVirtual<uint32_t*>(guest_address));
+}
 }  // namespace cpu
 }  // namespace xe

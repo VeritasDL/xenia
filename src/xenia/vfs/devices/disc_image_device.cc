@@ -32,6 +32,8 @@ bool DiscImageDevice::Initialize() {
   if (!mmap_) {
     XELOGE("Disc image could not be mapped");
     return false;
+  } else {
+    XELOGFS("DiscImageDevice::Initialize");
   }
 
   ParseState state = {0};
@@ -110,7 +112,7 @@ bool DiscImageDevice::VerifyMagic(ParseState* state, size_t offset) {
 
 DiscImageDevice::Error DiscImageDevice::ReadAllEntries(
     ParseState* state, const uint8_t* root_buffer) {
-  auto root_entry = new DiscImageEntry(this, nullptr, "", mmap_.get());
+  auto root_entry = new DiscImageEntry(this, nullptr, "", "", mmap_.get());
   root_entry->attributes_ = kFileAttributeDirectory;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
 
@@ -138,7 +140,9 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer,
     return false;
   }
 
-  auto name = std::string(name_buffer, name_length);
+  // Filename is stored as Windows-1252, convert it to UTF-8.
+  auto ansi_name = std::string(name_buffer, name_length);
+  auto name = xe::win1252_to_utf8(ansi_name);
 
   auto entry = DiscImageEntry::Create(this, parent, name, mmap_.get());
   entry->attributes_ = attributes | kFileAttributeReadOnly;

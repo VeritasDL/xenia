@@ -44,7 +44,19 @@ template <typename T>
 constexpr bool is_pow2(T value) {
   return (value & (value - 1)) == 0;
 }
+/*
+        Use this in place of the shift + and not sequence that is being used
+   currently in bit iteration code. This is more efficient because it does not
+   introduce a dependency on to the previous bit scanning operation. The shift
+   and not sequence does get translated to a single instruction (the bit test
+   and reset instruction), but this code can be executed alongside the scan
+*/
+template <typename T>
+constexpr T clear_lowest_bit(T value) {
+  static_assert(std::is_integral_v<T>);
 
+  return (value - static_cast<T>(1)) & value;
+}
 // Rounds up the given value to the given alignment.
 template <typename T>
 constexpr T align(T value, T alignment) {
@@ -311,7 +323,14 @@ inline T log2_ceil(T v) {
 
 template <typename T>
 inline T rotate_left(T v, uint8_t sh) {
-  return (T(v) << sh) | (T(v) >> ((sizeof(T) * 8) - sh));
+  return (T(v) << sh) | (T(v) >> ((sizeof(T) * CHAR_BIT) - sh));
+}
+template <typename T>
+inline T rotate_right(T v, uint8_t sh) {
+  constexpr unsigned char SHIFT_MASK = (CHAR_BIT * sizeof(T)) - 1;
+  uint8_t rshr = sh & SHIFT_MASK;
+  uint8_t lshl = static_cast<uint8_t>(-static_cast<int8_t>(sh)) & SHIFT_MASK;
+  return (n >> rshr) | (n << lshl);
 }
 #if XE_PLATFORM_WIN32
 template <>
@@ -329,6 +348,22 @@ inline uint32_t rotate_left(uint32_t v, uint8_t sh) {
 template <>
 inline uint64_t rotate_left(uint64_t v, uint8_t sh) {
   return _rotl64(v, sh);
+}
+template <>
+inline uint8_t rotate_right(uint8_t v, uint8_t sh) {
+  return _rotr8(v, sh);
+}
+template <>
+inline uint16_t rotate_right(uint16_t v, uint8_t sh) {
+  return _rotr16(v, sh);
+}
+template <>
+inline uint32_t rotate_right(uint32_t v, uint8_t sh) {
+  return _rotr(v, sh);
+}
+template <>
+inline uint64_t rotate_right(uint64_t v, uint8_t sh) {
+  return _rotr64(v, sh);
 }
 #endif  // XE_PLATFORM_WIN32
 
@@ -372,7 +407,98 @@ template <int N>
 int64_t m128_i64(const __m128& v) {
   return m128_i64<N>(_mm_castps_pd(v));
 }
+/*
+
+        std::min/max float has handling for nans, where if either argument is
+   nan the first argument is returned
+
+        minss/maxss are different, if either argument is nan the second operand
+   to the instruction is returned this is problematic because we have no
+   assurances from the compiler on the argument ordering
+
+        so only use in places where nan handling is not needed
+*/
+XE_FORCEINLINE
+static float ArchMin(float x, float y) {
+  return _mm_cvtss_f32(_mm_min_ss(_mm_set_ss(x), _mm_set_ss(y)));
+}
+XE_FORCEINLINE
+static float ArchMax(float x, float y) {
+  return _mm_cvtss_f32(_mm_max_ss(_mm_set_ss(x), _mm_set_ss(y)));
+}
+XE_FORCEINLINE
+static float ArchReciprocal(float den) {
+  return _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ss(den)));
+}
+
+using ArchFloatMask = __m128;
+
+XE_FORCEINLINE
+static ArchFloatMask ArchCmpneqFloatMask(float x, float y) {
+  return _mm_cmpneq_ss(_mm_set_ss(x), _mm_set_ss(y));
+}
+XE_FORCEINLINE
+static ArchFloatMask ArchORFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return _mm_or_ps(x, y);
+}
+XE_FORCEINLINE
+static ArchFloatMask ArchXORFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return _mm_xor_ps(x, y);
+}
+
+XE_FORCEINLINE
+static ArchFloatMask ArchANDFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return _mm_and_ps(x, y);
+}
+
+XE_FORCEINLINE
+static uint32_t ArchFloatMaskSignbit(ArchFloatMask x) {
+  return static_cast<uint32_t>(_mm_movemask_ps(x) & 1);
+}
+
+constexpr ArchFloatMask floatmask_zero{.0f};
+
+#else
+static float ArchMin(float x, float y) { return std::min<float>(x, y); }
+static float ArchMax(float x, float y) { return std::max<float>(x, y); }
+static float ArchReciprocal(float den) { return 1.0f / den; }
+using ArchFloatMask = unsigned;
+
+XE_FORCEINLINE
+static ArchFloatMask ArchCmpneqFloatMask(float x, float y) {
+  return static_cast<unsigned>(-static_cast<signed>(x != y));
+}
+
+XE_FORCEINLINE
+static ArchFloatMask ArchORFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return x | y;
+}
+XE_FORCEINLINE
+static ArchFloatMask ArchXORFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return x ^ y;
+}
+
+XE_FORCEINLINE
+static ArchFloatMask ArchANDFloatMask(ArchFloatMask x, ArchFloatMask y) {
+  return x & y;
+}
+constexpr ArchFloatMask floatmask_zero = 0;
+
+XE_FORCEINLINE
+static uint32_t ArchFloatMaskSignbit(ArchFloatMask x) { return x >> 31; }
+
 #endif
+XE_FORCEINLINE
+static float RefineReciprocal(float initial, float den) {
+  float t0 = initial * den;
+  float t1 = t0 * initial;
+  float rcp2 = initial + initial;
+  return rcp2 - t1;
+}
+XE_FORCEINLINE
+static float ArchReciprocalRefined(float den) {
+  return RefineReciprocal(ArchReciprocal(den), den);
+}
 
 // Similar to the C++ implementation of XMConvertFloatToHalf and
 // XMConvertHalfToFloat from DirectXMath 3.00 (pre-3.04, which switched from the
@@ -468,6 +594,131 @@ inline T sat_sub(T a, T b) {
   return T(result);
 }
 
+template <typename T>
+inline T roundToNearestOrderOfMagnitude(T value) {
+  if (!value) {
+    return value;
+  }
+
+  const double order = std::pow(10, std::floor(std::log10(std::fabs(value))));
+  const double rounded = std::round(value / order) * order;
+
+  return static_cast<T>(rounded);
+}
+
+namespace divisors {
+union IDivExtraInfo {
+  uint32_t value_;
+  struct {
+    uint32_t shift_ : 31;
+    uint32_t add_ : 1;
+  } info;
+};
+// returns magicnum multiplier
+static constexpr uint32_t PregenerateUint32Div(uint32_t _denom,
+                                               uint32_t& out_extra) {
+  IDivExtraInfo extra{};
+
+  uint32_t d = _denom;
+  int p = 0;
+  uint32_t nc = 0, delta = 0, q1 = 0, r1 = 0, q2 = 0, r2 = 0;
+  struct {
+    unsigned M;
+    int a;
+    int s;
+  } magu{};
+  magu.a = 0;
+  nc = -1 - ((uint32_t) - (int32_t)d) % d;
+  p = 31;
+  q1 = 0x80000000 / nc;
+  r1 = 0x80000000 - q1 * nc;
+  q2 = 0x7FFFFFFF / d;
+  r2 = 0x7FFFFFFF - q2 * d;
+  do {
+    p += 1;
+    if (r1 >= nc - r1) {
+      q1 = 2 * q1 + 1;
+      r1 = 2 * r1 - nc;
+    } else {
+      q1 = 2 * q1;
+      r1 = 2 * r1;
+    }
+    if (r2 + 1 >= d - r2) {
+      if (q2 >= 0x7FFFFFFF) {
+        magu.a = 1;
+      }
+      q2 = 2 * q2 + 1;
+      r2 = 2 * r2 + 1 - d;
+
+    } else {
+      if (q2 >= 0x80000000U) {
+        magu.a = 1;
+      }
+      q2 = 2 * q2;
+      r2 = 2 * r2 + 1;
+    }
+    delta = d - 1 - r2;
+  } while (p < 64 && (q1 < delta || r1 == 0));
+
+  extra.info.add_ = magu.a;
+  extra.info.shift_ = p - 32;
+  out_extra = extra.value_;
+  return static_cast<uint64_t>(q2 + 1);
+}
+
+static constexpr uint32_t ApplyUint32Div(uint32_t num, uint32_t mul,
+                                         uint32_t extradata) {
+  IDivExtraInfo extra{};
+
+  extra.value_ = extradata;
+
+  uint32_t result = static_cast<uint32_t>(
+      (static_cast<uint64_t>(num) * static_cast<uint64_t>(mul)) >> 32);
+  if (extra.info.add_) {
+    uint32_t addend = result + num;
+    addend = ((addend < result ? 0x80000000 : 0) | addend);
+    result = addend;
+  }
+  return result >> extra.info.shift_;
+}
+
+static constexpr uint32_t ApplyUint32UMod(uint32_t num, uint32_t mul,
+                                          uint32_t extradata,
+                                          uint32_t original) {
+  uint32_t dived = ApplyUint32Div(num, mul, extradata);
+  unsigned result = num - (dived * original);
+
+  return result;
+}
+
+struct MagicDiv {
+  uint32_t multiplier_;
+  uint32_t extradata_;
+  constexpr MagicDiv() : multiplier_(0), extradata_(0) {}
+  constexpr MagicDiv(uint32_t original) : MagicDiv() {
+    multiplier_ = PregenerateUint32Div(original, extradata_);
+  }
+
+  constexpr uint32_t GetRightShift() const {
+    IDivExtraInfo extra{};
+
+    extra.value_ = extradata_;
+    return extra.info.shift_;
+  }
+
+  constexpr bool AddFlag() const {
+    IDivExtraInfo extra{};
+
+    extra.value_ = extradata_;
+    return extra.info.shift_;
+  }
+
+  constexpr uint32_t GetMultiplier() const { return multiplier_; }
+  constexpr uint32_t Apply(uint32_t numerator) const {
+    return ApplyUint32Div(numerator, multiplier_, extradata_);
+  }
+};
+}  // namespace divisors
 }  // namespace xe
 
 #endif  // XENIA_BASE_MATH_H_

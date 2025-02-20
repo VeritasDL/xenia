@@ -20,7 +20,12 @@
 #include "xenia/base/delegate.h"
 #include "xenia/base/exception_handler.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/util/game_info_database.h"
+#include "xenia/kernel/util/xlast.h"
 #include "xenia/memory.h"
+#include "xenia/patcher/patcher.h"
+#include "xenia/patcher/plugin_loader.h"
+#include "xenia/vfs/device.h"
 #include "xenia/vfs/virtual_file_system.h"
 #include "xenia/xbox.h"
 
@@ -49,6 +54,8 @@ class Window;
 namespace xe {
 
 constexpr fourcc_t kEmulatorSaveSignature = make_fourcc("XSAV");
+static const std::string kDefaultGameSymbolicLink = "GAME:";
+static const std::string kDefaultPartitionSymbolicLink = "D:";
 
 // The main type that runs the whole emulator.
 // This is responsible for initializing and managing all the various subsystems.
@@ -117,6 +124,8 @@ class Emulator {
   // Are we currently running a title?
   bool is_title_open() const { return title_id_.has_value(); }
 
+  uint32_t main_thread_id();
+
   // Window used for displaying graphical output. Can be null.
   ui::Window* display_window() const { return display_window_; }
 
@@ -154,6 +163,10 @@ class Emulator {
   // This is effectively the guest operating system.
   kernel::KernelState* kernel_state() const { return kernel_state_.get(); }
 
+  patcher::Patcher* patcher() const { return patcher_.get(); }
+
+  patcher::PluginLoader* plugin_loader() const { return plugin_loader_.get(); }
+
   // Initializes the emulator and configures all components.
   // The given window is used for display and the provided functions are used
   // to create subsystems as required.
@@ -172,6 +185,28 @@ class Emulator {
   // Terminates the currently running title.
   X_STATUS TerminateTitle();
 
+  const std::unique_ptr<vfs::Device> CreateVfsDevice(
+      const std::filesystem::path& path, const std::string_view mount_path);
+
+  X_STATUS MountPath(const std::filesystem::path& path,
+                     const std::string_view mount_path);
+
+  enum class FileSignatureType {
+    XEX1,
+    XEX2,
+    ELF,
+    CON,
+    LIVE,
+    PIRS,
+    XISO,
+    ZAR,
+    EXE,
+    Unknown
+  };
+
+  // Determine the executable signature
+  FileSignatureType GetFileSignature(const std::filesystem::path& path);
+
   // Launches a game from the given file path.
   // This will attempt to infer the type of the given file (such as an iso, etc)
   // using heuristics.
@@ -184,29 +219,64 @@ class Emulator {
   // Launches a game from a disc image file (.iso, etc).
   X_STATUS LaunchDiscImage(const std::filesystem::path& path);
 
+  // Launches a game from a disc archive file (.zar, etc).
+  X_STATUS LaunchDiscArchive(const std::filesystem::path& path);
+
   // Launches a game from an STFS container file.
   X_STATUS LaunchStfsContainer(const std::filesystem::path& path);
+
+  X_STATUS LaunchDefaultModule(const std::filesystem::path& path);
+
+  struct ContentInstallationInfo {
+    XContentType content_type;
+    std::string installation_path;
+    std::string content_name;
+  };
+
+  // Migrates data from content to content/xuid with respect to common data.
+  X_STATUS DataMigration(const uint64_t xuid);
+
+  // Extract content of package to content specific directory.
+  X_STATUS InstallContentPackage(const std::filesystem::path& path,
+                                 ContentInstallationInfo& installation_info);
+
+  // Extract content of zar package to desired directory.
+  X_STATUS Emulator::ExtractZarchivePackage(
+      const std::filesystem::path& path,
+      const std::filesystem::path& extract_dir);
+
+  // Pack contents of a folder into a zar package.
+  X_STATUS CreateZarchivePackage(const std::filesystem::path& inputDirectory,
+                                 const std::filesystem::path& outputFile);
+
+  struct PackContext {
+    std::filesystem::path outputFilePath;
+    std::ofstream currentOutputFile;
+    bool hasError{false};
+  };
 
   void Pause();
   void Resume();
   bool is_paused() const { return paused_; }
-
   bool SaveToFile(const std::filesystem::path& path);
   bool RestoreFromFile(const std::filesystem::path& path);
 
   // The game can request another title to be loaded.
-  bool TitleRequested();
-  void LaunchNextTitle();
+  const std::filesystem::path GetNewDiscPath(std::string window_message = "");
 
   void WaitUntilExit();
 
  public:
   xe::Delegate<uint32_t, const std::string_view> on_launch;
   xe::Delegate<bool> on_shader_storage_initialization;
+  xe::Delegate<> on_patch_apply;
   xe::Delegate<> on_terminate;
   xe::Delegate<> on_exit;
 
  private:
+  enum : uint64_t { EmulatorFlagDisclaimerAcknowledged = 1ULL << 0 };
+  static uint64_t GetPersistentEmulatorFlags();
+  static void SetPersistentEmulatorFlags(uint64_t new_flags);
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
 
@@ -238,6 +308,8 @@ class Emulator {
 
   std::unique_ptr<cpu::ExportResolver> export_resolver_;
   std::unique_ptr<vfs::VirtualFileSystem> file_system_;
+  std::unique_ptr<patcher::Patcher> patcher_;
+  std::unique_ptr<patcher::PluginLoader> plugin_loader_;
 
   std::unique_ptr<kernel::KernelState> kernel_state_;
 
@@ -251,7 +323,9 @@ class Emulator {
   size_t game_config_load_callback_loop_next_index_ = SIZE_MAX;
 
   kernel::object_ref<kernel::XThread> main_thread_;
+  kernel::object_ref<kernel::XHostThread> plugin_loader_thread_;
   std::optional<uint32_t> title_id_;  // Currently running title ID
+  std::unique_ptr<kernel::util::GameInfoDatabase> game_info_database_;
 
   bool paused_;
   bool restoring_;

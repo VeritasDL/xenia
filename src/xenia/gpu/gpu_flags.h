@@ -18,6 +18,8 @@ DECLARE_path(dump_shaders);
 
 DECLARE_bool(vsync);
 
+DECLARE_uint64(framerate_limit);
+
 DECLARE_bool(gpu_allow_invalid_fetch_constants);
 
 DECLARE_bool(non_seamless_cube_map);
@@ -25,5 +27,7 @@ DECLARE_bool(non_seamless_cube_map);
 DECLARE_bool(half_pixel_offset);
 
 DECLARE_int32(query_occlusion_fake_sample_count);
+
+DECLARE_bool(disassemble_pm4);
 
 #endif  // XENIA_GPU_GPU_FLAGS_H_

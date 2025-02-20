@@ -37,8 +37,8 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     return X_ERROR_INVALID_HANDLE;
   }
 
-  auto run = [e, buffer_ptr](uint32_t& extended_error,
-                             uint32_t& length) -> X_RESULT {
+  auto run = [e, buffer_ptr, overlapped_ptr](uint32_t& extended_error,
+                                             uint32_t& length) -> X_RESULT {
     X_RESULT result;
     uint32_t item_count = 0;
     if (!buffer_ptr) {
@@ -49,6 +49,9 @@ uint32_t xeXamEnumerate(uint32_t handle, uint32_t flags, lpvoid_t buffer_ptr,
     }
     extended_error = X_HRESULT_FROM_WIN32(result);
     length = item_count;
+    if (result && overlapped_ptr) {
+      result = X_ERROR_FUNCTION_FAILED;
+    }
     return result;
   };
 
@@ -83,13 +86,23 @@ dword_result_t XamEnumerate_entry(dword_t handle, dword_t flags,
 }
 DECLARE_XAM_EXPORT1(XamEnumerate, kNone, kImplemented);
 
-dword_result_t XamCreateEnumeratorHandle_entry(unknown_t unk1, unknown_t unk2,
-                                               unknown_t unk3, unknown_t unk4,
-                                               unknown_t unk5, unknown_t unk6,
-                                               unknown_t unk7, unknown_t unk8) {
-  return X_ERROR_INVALID_PARAMETER;
+dword_result_t XamCreateEnumeratorHandle_entry(
+    dword_t user_index, dword_t app_id, dword_t open_message,
+    dword_t close_message, dword_t extra_size, dword_t item_count,
+    dword_t flags, lpdword_t out_handle) {
+  auto e = object_ref<XStaticUntypedEnumerator>(
+      new XStaticUntypedEnumerator(kernel_state(), item_count, extra_size));
+
+  auto result = e->Initialize(user_index, app_id, open_message, close_message,
+                              flags, extra_size, nullptr);
+  if (XFAILED(result)) {
+    return result;
+  }
+
+  *out_handle = e->handle();
+  return X_ERROR_SUCCESS;
 }
-DECLARE_XAM_EXPORT1(XamCreateEnumeratorHandle, kNone, kStub);
+DECLARE_XAM_EXPORT1(XamCreateEnumeratorHandle, kNone, kImplemented);
 
 dword_result_t XamGetPrivateEnumStructureFromHandle_entry(
     dword_t handle, lpdword_t out_object_ptr) {

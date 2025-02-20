@@ -7,10 +7,17 @@ project("xenia-vfs")
   kind("StaticLib")
   language("C++")
   links({
-    "xenia-base",
+    "xenia-base", "zstd", "zarchive"
   })
   defines({
   })
+  filter({"configurations:Release", "platforms:Windows"})
+    buildoptions({
+      "/Os",
+      "/O1"
+    })
+  filter {}
+
   recursive_platform_files()
   removefiles({"vfs_dump.cc"})
 

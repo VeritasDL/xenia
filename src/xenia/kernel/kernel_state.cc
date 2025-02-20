@@ -18,15 +18,29 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/emulator.h"
+#include "xenia/hid/input_system.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_ob.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xmodule.h"
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+#include "xenia/ui/imgui_host_notification.h"
+
+#include "third_party/crypto/TinySHA1.hpp"
+
+DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
+
+DEFINE_uint32(kernel_build_version, 1888, "Define current kernel version",
+              "Kernel");
+
+DECLARE_string(cl);
 
 namespace xe {
 namespace kernel {
@@ -44,26 +58,27 @@ KernelState::KernelState(Emulator* emulator)
     : emulator_(emulator),
       memory_(emulator->memory()),
       dispatch_thread_running_(false),
-      dpc_list_(emulator->memory()) {
-  processor_ = emulator->processor();
-  file_system_ = emulator->file_system();
-
-  app_manager_ = std::make_unique<xam::AppManager>();
-  user_profile_ = std::make_unique<xam::UserProfile>();
-
-  auto content_root = emulator_->content_root();
-  if (!content_root.empty()) {
-    content_root = std::filesystem::absolute(content_root);
-  }
-  content_manager_ = std::make_unique<xam::ContentManager>(this, content_root);
-
+      dpc_list_(emulator->memory()),
+      kernel_trampoline_group_(emulator->processor()->backend()) {
   assert_null(shared_kernel_state_);
   shared_kernel_state_ = this;
+  processor_ = emulator->processor();
+  file_system_ = emulator->file_system();
+  xam_state_ = std::make_unique<xam::XamState>(emulator, this);
+
+  InitializeKernelGuestGlobals();
+  kernel_version_ = KernelVersion(cvars::kernel_build_version);
 
   // Hardcoded maximum of 2048 TLS slots.
   tls_bitmap_.Resize(2048);
 
-  xam::AppManager::RegisterApps(this, app_manager_.get());
+  auto hc_loc_heap = memory_->LookupHeap(strange_hardcoded_page_);
+  bool fixed_alloc_worked = hc_loc_heap->AllocFixed(
+      strange_hardcoded_page_, 65536, 0,
+      kMemoryAllocationCommit | kMemoryAllocationReserve,
+      kMemoryProtectRead | kMemoryProtectWrite);
+
+  xenia_assert(fixed_alloc_worked);
 }
 
 KernelState::~KernelState() {
@@ -82,8 +97,7 @@ KernelState::~KernelState() {
   // Delete all objects.
   object_table_.Reset();
 
-  // Shutdown apps.
-  app_manager_.reset();
+  xam_state_.reset();
 
   assert_true(shared_kernel_state_ == this);
   shared_kernel_state_ = nullptr;
@@ -92,6 +106,10 @@ KernelState::~KernelState() {
 KernelState* KernelState::shared() { return shared_kernel_state_; }
 
 uint32_t KernelState::title_id() const {
+  if (!executable_module_) {
+    return 0;
+  }
+
   assert_not_null(executable_module_);
 
   xex2_opt_execution_info* exec_info = 0;
@@ -102,6 +120,18 @@ uint32_t KernelState::title_id() const {
   }
 
   return 0;
+}
+
+bool KernelState::is_title_system_type(uint32_t title_id) {
+  if (!title_id) {
+    return true;
+  }
+
+  if ((title_id & 0xFF000000) == 0x58000000u) {
+    return (title_id & 0xFF0000) != 0x410000;  // if 'X' but not 'XA' (XBLA)
+  }
+
+  return (title_id >> 16) == 0xFFFE;
 }
 
 util::XdbfGameData KernelState::title_xdbf() const {
@@ -122,18 +152,6 @@ util::XdbfGameData KernelState::module_xdbf(
     return db;
   }
   return util::XdbfGameData(nullptr, resource_size);
-}
-
-uint32_t KernelState::process_type() const {
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  return pib->process_type;
-}
-
-void KernelState::set_process_type(uint32_t value) {
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  pib->process_type = uint8_t(value);
 }
 
 uint32_t KernelState::AllocateTLS() { return uint32_t(tls_bitmap_.Acquire()); }
@@ -312,30 +330,32 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
     return;
   }
 
-  assert_zero(process_info_block_address_);
-  process_info_block_address_ = memory_->SystemHeapAlloc(0x60);
+  auto title_process =
+      memory_->TranslateVirtual<X_KPROCESS*>(GetTitleProcess());
 
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  // TODO(benvanik): figure out what this list is.
-  pib->unk_04 = pib->unk_08 = 0;
-  pib->unk_0C = 0x0000007F;
-  pib->unk_10 = 0x001F0000;
-  pib->thread_count = 0;
-  pib->unk_1B = 0x06;
-  pib->kernel_stack_size = 16 * 1024;
-  pib->process_type = process_type_;
-  // TODO(benvanik): figure out what this list is.
-  pib->unk_54 = pib->unk_58 = 0;
+  InitializeProcess(title_process, X_PROCTYPE_TITLE, 10, 13, 17);
 
   xex2_opt_tls_info* tls_header = nullptr;
   executable_module_->GetOptHeader(XEX_HEADER_TLS_INFO, &tls_header);
   if (tls_header) {
-    auto pib = memory_->TranslateVirtual<ProcessInfoBlock*>(
-        process_info_block_address_);
-    pib->tls_data_size = tls_header->data_size;
-    pib->tls_raw_data_size = tls_header->raw_data_size;
-    pib->tls_slot_size = tls_header->slot_count * 4;
+    title_process->tls_static_data_address = tls_header->raw_data_address;
+    title_process->tls_data_size = tls_header->data_size;
+    title_process->tls_raw_data_size = tls_header->raw_data_size;
+    title_process->tls_slot_size = tls_header->slot_count * 4;
+    SetProcessTLSVars(title_process, tls_header->slot_count,
+                      tls_header->data_size, tls_header->raw_data_address);
+  }
+
+  uint32_t kernel_stacksize = 0;
+
+  executable_module_->GetOptHeader(XEX_HEADER_DEFAULT_STACK_SIZE,
+                                   &kernel_stacksize);
+  if (kernel_stacksize) {
+    kernel_stacksize = (kernel_stacksize + 4095) & 0xFFFFF000;
+    if (kernel_stacksize < 0x4000) {
+      kernel_stacksize = 0x4000;
+    }
+    title_process->kernel_stack_size = kernel_stacksize;
   }
 
   // Setup the kernel's XexExecutableModuleHandle field.
@@ -359,13 +379,33 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
         variable_ptr, executable_module_->path(),
         xboxkrnl::XboxkrnlModule::kExLoadedImageNameSize);
   }
+
+  // Setup the kernel's ExLoadedCommandLine field
+  export_entry = processor()->export_resolver()->GetExportByOrdinal(
+      "xboxkrnl.exe", ordinals::ExLoadedCommandLine);
+  if (export_entry) {
+    char* variable_ptr =
+        memory()->TranslateVirtual<char*>(export_entry->variable_ptr);
+
+    std::string module_name =
+        fmt::format("\"{}.xex\"", executable_module_->name());
+    if (!cvars::cl.empty()) {
+      module_name += " " + cvars::cl;
+    }
+
+    xe::string_util::copy_truncating(
+        variable_ptr, module_name,
+        xboxkrnl::XboxkrnlModule::kExLoadedCommandLineSize);
+  }
+
   // Spin up deferred dispatch worker.
   // TODO(benvanik): move someplace more appropriate (out of ctor, but around
   // here).
   if (!dispatch_thread_running_) {
     dispatch_thread_running_ = true;
-    dispatch_thread_ =
-        object_ref<XHostThread>(new XHostThread(this, 128 * 1024, 0, [this]() {
+    dispatch_thread_ = object_ref<XHostThread>(new XHostThread(
+        this, 128 * 1024, 0,
+        [this]() {
           // As we run guest callbacks the debugger must be able to suspend us.
           dispatch_thread_->set_can_debugger_suspend(true);
 
@@ -386,7 +426,8 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
             fn();
           }
           return 0;
-        }));
+        },
+        GetSystemProcess()));  // don't think an equivalent exists on real hw
     dispatch_thread_->set_name("Kernel Dispatch");
     dispatch_thread_->Create();
   }
@@ -414,7 +455,7 @@ object_ref<UserModule> KernelState::LoadUserModule(
 
     // See if we've already loaded it
     for (auto& existing_module : user_modules_) {
-      if (existing_module->path() == path) {
+      if (existing_module->Matches(path)) {
         return existing_module;
       }
     }
@@ -434,8 +475,56 @@ object_ref<UserModule> KernelState::LoadUserModule(
     // Putting into the listing automatically retains.
     user_modules_.push_back(module);
   }
+  return module;
+}
 
+object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
+    const std::string_view raw_name, const void* addr, const size_t length) {
+  auto name = xe::utf8::find_base_name_from_guest_path(raw_name);
+
+  object_ref<UserModule> module;
+  {
+    auto global_lock = global_critical_region_.Acquire();
+
+    // See if we've already loaded it
+    for (auto& existing_module : user_modules_) {
+      if (existing_module->Matches(name)) {
+        return existing_module;
+      }
+    }
+
+    global_lock.unlock();
+
+    // Module wasn't loaded, so load it.
+    module = object_ref<UserModule>(new UserModule(this));
+    X_STATUS status = module->LoadFromMemoryNamed(name, addr, length);
+    if (XFAILED(status)) {
+      object_table()->ReleaseHandle(module->handle());
+      return nullptr;
+    }
+
+    global_lock.lock();
+
+    // Putting into the listing automatically retains.
+    user_modules_.push_back(module);
+  }
+  return module;
+}
+
+X_RESULT KernelState::FinishLoadingUserModule(
+    const object_ref<UserModule> module, bool call_entry) {
+  // TODO(Gliniak): Apply custom patches here
+  X_RESULT result = module->LoadContinue();
+  if (XFAILED(result)) {
+    return result;
+  }
   module->Dump();
+  emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
+                                             module->hash());
+  emulator_->on_patch_apply();
+  if (module->xex_module()) {
+    module->xex_module()->Precompile();
+  }
 
   if (module->is_dll_module() && module->entry_point() && call_entry) {
     // Call DllMain(DLL_PROCESS_ATTACH):
@@ -449,8 +538,146 @@ object_ref<UserModule> KernelState::LoadUserModule(
     processor()->Execute(thread_state, module->entry_point(), args,
                          xe::countof(args));
   }
+  return result;
+}
 
-  return module;
+X_RESULT KernelState::ApplyTitleUpdate(
+    const object_ref<UserModule> title_module) {
+  const auto title_updates = FindTitleUpdate(title_module->title_id());
+  if (title_updates.empty()) {
+    return X_STATUS_SUCCESS;
+  }
+
+  auto patch_module = LoadTitleUpdate(&title_updates.front(), title_module);
+  if (!patch_module) {
+    return X_STATUS_SUCCESS;
+  }
+
+  if (!patch_module->xex_module()->is_patch()) {
+    return X_STATUS_UNSUCCESSFUL;
+  }
+
+  if (!IsPatchSignatureProper(title_module, patch_module)) {
+    // First module that is loaded is always main executable. That way we can
+    // prevent random message spam in case of loading/unloading.
+    if (!GetExecutableModule()) {
+      emulator_->display_window()->app_context().CallInUIThread([&]() {
+        new xe::ui::HostNotificationWindow(
+            emulator_->imgui_drawer(), "Warning!",
+            "Title Update signature doesn't match. This can cause unexpected "
+            "issues or crashes!",
+            0);
+      });
+    }
+  }
+
+  return ApplyTitleUpdate(title_module, patch_module);
+}
+
+std::vector<xam::XCONTENT_AGGREGATE_DATA> KernelState::FindTitleUpdate(
+    const uint32_t title_id) const {
+  if (!cvars::apply_title_update) {
+    return {};
+  }
+
+  return xam_state_->content_manager()->ListContent(
+      1, 0, title_id, xe::XContentType::kInstaller);
+}
+
+const object_ref<UserModule> KernelState::LoadTitleUpdate(
+    const xam::XCONTENT_AGGREGATE_DATA* title_update,
+    const object_ref<UserModule> module) {
+  uint32_t disc_number = -1;
+  if (module->is_multi_disc_title()) {
+    disc_number = module->disc_number();
+  }
+
+  uint32_t content_license = 0;
+  X_RESULT open_status = content_manager()->OpenContent(
+      "UPDATE", 0, *title_update, content_license, disc_number);
+
+  // Use the corresponding patch for the launch module
+  std::filesystem::path patch_xexp;
+
+  std::string mount_path = "";
+  file_system()->FindSymbolicLink("game:", mount_path);
+
+  auto is_relative = std::filesystem::relative(module->path(), mount_path);
+
+  if (is_relative.empty()) {
+    return nullptr;
+  }
+
+  patch_xexp =
+      is_relative.replace_extension(is_relative.extension().string() + "p");
+
+  std::string resolved_path = "";
+  file_system()->FindSymbolicLink("UPDATE:", resolved_path);
+  xe::vfs::Entry* patch_entry = kernel_state()->file_system()->ResolvePath(
+      resolved_path + patch_xexp.generic_string());
+
+  if (!patch_entry) {
+    return nullptr;
+  }
+
+  const std::string patch_path = patch_entry->absolute_path();
+  XELOGI("Loading XEX patch from {}", patch_path);
+  auto patch_module = object_ref<UserModule>(new UserModule(this));
+
+  X_RESULT result = patch_module->LoadFromFile(patch_path);
+  if (result != X_STATUS_SUCCESS) {
+    XELOGE("Failed to load XEX patch, code: {}", result);
+    return nullptr;
+  }
+
+  return patch_module;
+}
+
+bool KernelState::IsPatchSignatureProper(
+    const object_ref<UserModule> title_module,
+    const object_ref<UserModule> patch_module) const {
+  xex2_opt_delta_patch_descriptor* patch_header = nullptr;
+  patch_module->GetOptHeader(XEX_HEADER_DELTA_PATCH_DESCRIPTOR,
+                             reinterpret_cast<void**>(&patch_header));
+
+  assert_not_null(patch_header);
+
+  // Compare hash inside delta descriptor to base XEX signature
+  uint8_t digest[0x14];
+  sha1::SHA1 s;
+  s.processBytes(title_module->xex_module()->xex_security_info()->rsa_signature,
+                 0x100);
+  s.finalize(digest);
+
+  if (memcmp(digest, patch_header->digest_source, 0x14) != 0) {
+    XELOGW(
+        "XEX patch signature hash doesn't match base XEX signature hash, patch "
+        "will likely fail!");
+
+    return false;
+  }
+  return true;
+}
+
+X_RESULT KernelState::ApplyTitleUpdate(
+    const object_ref<UserModule> title_module,
+    const object_ref<UserModule> patch_module) {
+  if (!title_module) {
+    XELOGE("{}: No title_module provided!", __FUNCTION__);
+    return X_STATUS_UNSUCCESSFUL;
+  }
+
+  if (!patch_module) {
+    XELOGE("{}: No patch_module provided!", __FUNCTION__);
+    return X_STATUS_UNSUCCESSFUL;
+  }
+
+  X_STATUS result =
+      patch_module->xex_module()->ApplyPatch(title_module->xex_module());
+  if (result != X_STATUS_SUCCESS) {
+    XELOGE("Failed to apply XEX patch, code: {}", result);
+  }
+  return result;
 }
 
 void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
@@ -483,7 +710,7 @@ void KernelState::UnloadUserModule(const object_ref<UserModule>& module,
                              return e->path() == module->path();
                            }) == user_modules_.end());
 
-  object_table()->ReleaseHandle(module->handle());
+  object_table()->ReleaseHandleInLock(module->handle());
 }
 
 void KernelState::TerminateTitle() {
@@ -551,11 +778,6 @@ void KernelState::TerminateTitle() {
   // Unset the executable module.
   executable_module_ = nullptr;
 
-  if (process_info_block_address_) {
-    memory_->SystemHeapFree(process_info_block_address_);
-    process_info_block_address_ = 0;
-  }
-
   if (XThread::IsInThread()) {
     threads_by_id_.erase(XThread::GetCurrentThread()->thread_id());
 
@@ -569,12 +791,6 @@ void KernelState::TerminateTitle() {
 void KernelState::RegisterThread(XThread* thread) {
   auto global_lock = global_critical_region_.Acquire();
   threads_by_id_[thread->thread_id()] = thread;
-
-  /*
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  pib->thread_count = pib->thread_count + 1;
-  */
 }
 
 void KernelState::UnregisterThread(XThread* thread) {
@@ -583,12 +799,6 @@ void KernelState::UnregisterThread(XThread* thread) {
   if (it != threads_by_id_.end()) {
     threads_by_id_.erase(it);
   }
-
-  /*
-  auto pib =
-      memory_->TranslateVirtual<ProcessInfoBlock*>(process_info_block_address_);
-  pib->thread_count = pib->thread_count - 1;
-  */
 }
 
 void KernelState::OnThreadExecute(XThread* thread) {
@@ -654,20 +864,14 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
   // Games seem to expect a few notifications on startup, only for the first
   // listener.
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
-  if (!has_notified_startup_ && listener->mask() & 0x00000001) {
+  if (!has_notified_startup_ && listener->mask() & kXNotifySystem) {
     has_notified_startup_ = true;
     // XN_SYS_UI (on, off)
-    listener->EnqueueNotification(0x00000009, 1);
-    listener->EnqueueNotification(0x00000009, 0);
+    listener->EnqueueNotification(kXNotificationIDSystemUI, 1);
+    listener->EnqueueNotification(kXNotificationIDSystemUI, 0);
     // XN_SYS_SIGNINCHANGED x2
-    listener->EnqueueNotification(0x0000000A, 1);
-    listener->EnqueueNotification(0x0000000A, 1);
-    // XN_SYS_INPUTDEVICESCHANGED x2
-    listener->EnqueueNotification(0x00000012, 0);
-    listener->EnqueueNotification(0x00000012, 0);
-    // XN_SYS_INPUTDEVICECONFIGCHANGED x2
-    listener->EnqueueNotification(0x00000013, 0);
-    listener->EnqueueNotification(0x00000013, 0);
+    listener->EnqueueNotification(kXNotificationIDSystemSignInChanged, 1);
+    listener->EnqueueNotification(kXNotificationIDSystemSignInChanged, 1);
   }
 }
 
@@ -781,6 +985,15 @@ void KernelState::CompleteOverlappedDeferredEx(
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
   XOverlappedSetResult(ptr, X_ERROR_IO_PENDING);
   XOverlappedSetContext(ptr, XThread::GetCurrentThreadHandle());
+  X_HANDLE event_handle = XOverlappedGetEvent(ptr);
+  if (event_handle) {
+    auto ev = object_table()->LookupObject<XObject>(event_handle);
+
+    assert_not_null(ev);
+    if (ev && ev->type() == XObject::Type::Event) {
+      ev.get<XEvent>()->Reset();
+    }
+  }
   auto global_lock = global_critical_region_.Acquire();
   dispatch_queue_.push_back([this, completion_callback, overlapped_ptr,
                              pre_callback, post_callback]() {
@@ -869,6 +1082,55 @@ bool KernelState::Save(ByteStream* stream) {
   return true;
 }
 
+// this only gets triggered once per ms at most, so fields other than tick count
+// will probably not be updated in a timely manner for guest code that uses them
+void KernelState::UpdateKeTimestampBundle() {
+  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+      memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(ke_timestamp_bundle_ptr_);
+  uint32_t uptime_ms = Clock::QueryGuestUptimeMillis();
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+                               Clock::QueryGuestInterruptTime());
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+                               Clock::QueryGuestSystemTime());
+  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count, uptime_ms);
+}
+
+uint32_t KernelState::GetKeTimestampBundle() {
+  XE_LIKELY_IF(ke_timestamp_bundle_ptr_) { return ke_timestamp_bundle_ptr_; }
+  else {
+    global_critical_region::PrepareToAcquire();
+    return CreateKeTimestampBundle();
+  }
+}
+
+XE_NOINLINE
+XE_COLD
+uint32_t KernelState::CreateKeTimestampBundle() {
+  auto crit = global_critical_region::Acquire();
+
+  uint32_t pKeTimeStampBundle =
+      memory_->SystemHeapAlloc(sizeof(X_TIME_STAMP_BUNDLE));
+  X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
+      memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(pKeTimeStampBundle);
+
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->interrupt_time,
+                               Clock::QueryGuestInterruptTime());
+
+  xe::store_and_swap<uint64_t>(&lpKeTimeStampBundle->system_time,
+                               Clock::QueryGuestSystemTime());
+
+  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->tick_count,
+                               Clock::QueryGuestUptimeMillis());
+
+  xe::store_and_swap<uint32_t>(&lpKeTimeStampBundle->padding, 0);
+
+  ke_timestamp_bundle_ptr_ = pKeTimeStampBundle;
+  timestamp_timer_ = xe::threading::HighResolutionTimer::CreateRepeating(
+      std::chrono::milliseconds(1),
+      [this]() { this->UpdateKeTimestampBundle(); });
+  return pKeTimeStampBundle;
+}
+
 bool KernelState::Restore(ByteStream* stream) {
   // Check the magic value.
   if (stream->Read<uint32_t>() != kKernelSaveSignature) {
@@ -913,5 +1175,302 @@ bool KernelState::Restore(ByteStream* stream) {
   return true;
 }
 
+std::bitset<4> KernelState::GetConnectedUsers() const {
+  auto input_sys = emulator_->input_system();
+
+  auto lock = input_sys->lock();
+
+  return input_sys->GetConnectedSlots();
+}
+// todo: definitely need to do more to pretend to be in a dpc
+void KernelState::BeginDPCImpersonation(cpu::ppc::PPCContext* context,
+                                        DPCImpersonationScope& scope) {
+  auto kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  xenia_assert(kpcr->prcb_data.dpc_active == 0);
+  scope.previous_irql_ = kpcr->current_irql;
+
+  kpcr->current_irql = 2;
+  kpcr->prcb_data.dpc_active = 1;
+}
+void KernelState::EndDPCImpersonation(cpu::ppc::PPCContext* context,
+                                      DPCImpersonationScope& end_scope) {
+  auto kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  xenia_assert(kpcr->prcb_data.dpc_active == 1);
+  kpcr->current_irql = end_scope.previous_irql_;
+  kpcr->prcb_data.dpc_active = 0;
+}
+void KernelState::EmulateCPInterruptDPC(uint32_t interrupt_callback,
+                                        uint32_t interrupt_callback_data,
+                                        uint32_t source, uint32_t cpu) {
+  if (!interrupt_callback) {
+    return;
+  }
+
+  auto thread = kernel::XThread::GetCurrentThread();
+  assert_not_null(thread);
+
+  // Pick a CPU, if needed. We're going to guess 2. Because.
+  if (cpu == 0xFFFFFFFF) {
+    cpu = 2;
+  }
+  thread->SetActiveCpu(cpu);
+
+  /*
+    in reality, our interrupt is a callback that is called in a dpc which is
+    scheduled by the actual interrupt
+
+    we need to impersonate a dpc
+  */
+  auto current_context = thread->thread_state()->context();
+  auto kthread = memory()->TranslateVirtual<X_KTHREAD*>(thread->guest_object());
+
+  auto pcr = memory()->TranslateVirtual<X_KPCR*>(thread->pcr_ptr());
+
+  DPCImpersonationScope dpc_scope{};
+  BeginDPCImpersonation(current_context, dpc_scope);
+
+  // todo: check VdGlobalXamDevice here. if VdGlobalXamDevice is nonzero, should
+  // set X_PROCTYPE_SYSTEM
+  xboxkrnl::xeKeSetCurrentProcessType(X_PROCTYPE_TITLE, current_context);
+
+  uint64_t args[] = {source, interrupt_callback_data};
+  processor_->Execute(thread->thread_state(), interrupt_callback, args,
+                      xe::countof(args));
+  xboxkrnl::xeKeSetCurrentProcessType(X_PROCTYPE_IDLE, current_context);
+
+  EndDPCImpersonation(current_context, dpc_scope);
+}
+
+void KernelState::InitializeProcess(X_KPROCESS* process, uint32_t type,
+                                    char unk_18, char unk_19, char unk_1A) {
+  uint32_t guest_kprocess = memory()->HostToGuestVirtual(process);
+
+  uint32_t thread_list_guest_ptr =
+      guest_kprocess + offsetof(X_KPROCESS, thread_list);
+
+  process->unk_18 = unk_18;
+  process->unk_19 = unk_19;
+  process->unk_1A = unk_1A;
+  util::XeInitializeListHead(&process->thread_list, thread_list_guest_ptr);
+  process->unk_0C = 60;
+  // doubt any guest code uses this ptr, which i think probably has something to
+  // do with the page table
+  process->clrdataa_masked_ptr = 0;
+  // clrdataa_ & ~(1U << 31);
+  process->thread_count = 0;
+  process->unk_1B = 0x06;
+  process->kernel_stack_size = 16 * 1024;
+  process->tls_slot_size = 0x80;
+
+  process->process_type = type;
+  uint32_t unk_list_guest_ptr = guest_kprocess + offsetof(X_KPROCESS, unk_54);
+  // TODO(benvanik): figure out what this list is.
+  util::XeInitializeListHead(&process->unk_54, unk_list_guest_ptr);
+}
+
+void KernelState::SetProcessTLSVars(X_KPROCESS* process, int num_slots,
+                                    int tls_data_size,
+                                    int tls_static_data_address) {
+  uint32_t slots_padded = (num_slots + 3) & 0xFFFFFFFC;
+  process->tls_data_size = tls_data_size;
+  process->tls_raw_data_size = tls_data_size;
+  process->tls_static_data_address = tls_static_data_address;
+  process->tls_slot_size = 4 * slots_padded;
+  uint32_t count_div32 = slots_padded / 32;
+  for (unsigned word_index = 0; word_index < count_div32; ++word_index) {
+    process->bitmap[word_index] = -1;
+  }
+
+  // set remainder of bitset
+  if (((num_slots + 3) & 0x1C) != 0)
+    process->bitmap[count_div32] = -1 << (32 - ((num_slots + 3) & 0x1C));
+}
+void AllocateThread(PPCContext* context) {
+  uint32_t thread_mem_size = static_cast<uint32_t>(context->r[3]);
+  uint32_t a2 = static_cast<uint32_t>(context->r[4]);
+  uint32_t a3 = static_cast<uint32_t>(context->r[5]);
+  if (thread_mem_size <= 0xFD8) thread_mem_size += 8;
+  uint32_t result =
+      xboxkrnl::xeAllocatePoolTypeWithTag(context, thread_mem_size, a2, a3);
+  if (((unsigned short)result & 0xFFF) != 0) {
+    result += 2;
+  }
+
+  context->r[3] = static_cast<uint64_t>(result);
+}
+void FreeThread(PPCContext* context) {
+  uint32_t thread_memory = static_cast<uint32_t>(context->r[3]);
+  if ((thread_memory & 0xFFF) != 0) {
+    thread_memory -= 8;
+  }
+  xboxkrnl::xeFreePool(context, thread_memory);
+}
+
+void SimpleForwardAllocatePoolTypeWithTag(PPCContext* context) {
+  uint32_t a1 = static_cast<uint32_t>(context->r[3]);
+  uint32_t a2 = static_cast<uint32_t>(context->r[4]);
+  uint32_t a3 = static_cast<uint32_t>(context->r[5]);
+  context->r[3] = static_cast<uint64_t>(
+      xboxkrnl::xeAllocatePoolTypeWithTag(context, a1, a2, a3));
+}
+void SimpleForwardFreePool(PPCContext* context) {
+  xboxkrnl::xeFreePool(context, static_cast<uint32_t>(context->r[3]));
+}
+
+void DeleteMutant(PPCContext* context) {
+  // todo: this should call kereleasemutant with some specific args
+
+  xe::FatalError("DeleteMutant - need KeReleaseMutant(mutant, 1, 1, 0) ");
+}
+void DeleteTimer(PPCContext* context) {
+  // todo: this should call KeCancelTimer
+  xe::FatalError("DeleteTimer - need KeCancelTimer(mutant, 1, 1, 0) ");
+}
+
+void DeleteIoCompletion(PPCContext* context) {}
+
+void UnknownProcIoDevice(PPCContext* context) {}
+
+void CloseFileProc(PPCContext* context) {}
+
+void DeleteFileProc(PPCContext* context) {}
+
+void UnknownFileProc(PPCContext* context) {}
+
+void DeleteSymlink(PPCContext* context) {
+  X_KSYMLINK* lnk = context->TranslateVirtualGPR<X_KSYMLINK*>(context->r[3]);
+
+  context->r[3] = lnk->refed_object_maybe;
+  xboxkrnl::xeObDereferenceObject(context, lnk->refed_object_maybe);
+}
+void KernelState::InitializeKernelGuestGlobals() {
+  kernel_guest_globals_ = memory_->SystemHeapAlloc(sizeof(KernelGuestGlobals));
+
+  KernelGuestGlobals* block =
+      memory_->TranslateVirtual<KernelGuestGlobals*>(kernel_guest_globals_);
+  memset(block, 0, sizeof(KernelGuestGlobals));
+
+  auto idle_process = memory()->TranslateVirtual<X_KPROCESS*>(GetIdleProcess());
+  InitializeProcess(idle_process, X_PROCTYPE_IDLE, 0, 0, 0);
+  idle_process->unk_0C = 0x7F;
+  auto system_process =
+      memory()->TranslateVirtual<X_KPROCESS*>(GetSystemProcess());
+  InitializeProcess(system_process, X_PROCTYPE_SYSTEM, 2, 5, 9);
+  SetProcessTLSVars(system_process, 32, 0, 0);
+
+  uint32_t oddobject_offset =
+      kernel_guest_globals_ + offsetof(KernelGuestGlobals, OddObj);
+
+  // init unknown object
+
+  block->OddObj.field0 = 0x1000000;
+  block->OddObj.field4 = 1;
+  block->OddObj.points_to_self =
+      oddobject_offset + offsetof(X_UNKNOWN_TYPE_REFED, points_to_self);
+  block->OddObj.points_to_prior = block->OddObj.points_to_self;
+
+  // init thread object
+  block->ExThreadObjectType.pool_tag = 0x65726854;
+  block->ExThreadObjectType.allocate_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(AllocateThread);
+
+  block->ExThreadObjectType.free_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(FreeThread);
+
+  // several object types just call freepool/allocatepool
+  uint32_t trampoline_allocatepool =
+      kernel_trampoline_group_.NewLongtermTrampoline(
+          SimpleForwardAllocatePoolTypeWithTag);
+  uint32_t trampoline_freepool =
+      kernel_trampoline_group_.NewLongtermTrampoline(SimpleForwardFreePool);
+
+  // init event object
+  block->ExEventObjectType.pool_tag = 0x76657645;
+  block->ExEventObjectType.allocate_proc = trampoline_allocatepool;
+  block->ExEventObjectType.free_proc = trampoline_freepool;
+
+  // init mutant object
+  block->ExMutantObjectType.pool_tag = 0x6174754D;
+  block->ExMutantObjectType.allocate_proc = trampoline_allocatepool;
+  block->ExMutantObjectType.free_proc = trampoline_freepool;
+
+  block->ExMutantObjectType.delete_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(DeleteMutant);
+  // init semaphore obj
+  block->ExSemaphoreObjectType.pool_tag = 0x616D6553;
+  block->ExSemaphoreObjectType.allocate_proc = trampoline_allocatepool;
+  block->ExSemaphoreObjectType.free_proc = trampoline_freepool;
+  // init timer obj
+  block->ExTimerObjectType.pool_tag = 0x656D6954;
+  block->ExTimerObjectType.allocate_proc = trampoline_allocatepool;
+  block->ExTimerObjectType.free_proc = trampoline_freepool;
+  block->ExTimerObjectType.delete_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(DeleteTimer);
+  // iocompletion object
+  block->IoCompletionObjectType.pool_tag = 0x706D6F43;
+  block->IoCompletionObjectType.allocate_proc = trampoline_allocatepool;
+  block->IoCompletionObjectType.free_proc = trampoline_freepool;
+  block->IoCompletionObjectType.delete_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(DeleteIoCompletion);
+  block->IoCompletionObjectType.unknown_size_or_object_ = oddobject_offset;
+
+  // iodevice object
+  block->IoDeviceObjectType.pool_tag = 0x69766544;
+  block->IoDeviceObjectType.allocate_proc = trampoline_allocatepool;
+  block->IoDeviceObjectType.free_proc = trampoline_freepool;
+  block->IoDeviceObjectType.unknown_size_or_object_ = oddobject_offset;
+  block->IoDeviceObjectType.unknown_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(UnknownProcIoDevice);
+
+  // file object
+  block->IoFileObjectType.pool_tag = 0x656C6946;
+  block->IoFileObjectType.allocate_proc = trampoline_allocatepool;
+  block->IoFileObjectType.free_proc = trampoline_freepool;
+  block->IoFileObjectType.unknown_size_or_object_ =
+      0x38;  // sizeof fileobject, i believe
+  block->IoFileObjectType.close_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(CloseFileProc);
+  block->IoFileObjectType.delete_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(DeleteFileProc);
+  block->IoFileObjectType.unknown_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(UnknownFileProc);
+
+  // directory object
+  block->ObDirectoryObjectType.pool_tag = 0x65726944;
+  block->ObDirectoryObjectType.allocate_proc = trampoline_allocatepool;
+  block->ObDirectoryObjectType.free_proc = trampoline_freepool;
+  block->ObDirectoryObjectType.unknown_size_or_object_ = oddobject_offset;
+
+  // symlink object
+  block->ObSymbolicLinkObjectType.pool_tag = 0x626D7953;
+  block->ObSymbolicLinkObjectType.allocate_proc = trampoline_allocatepool;
+  block->ObSymbolicLinkObjectType.free_proc = trampoline_freepool;
+  block->ObSymbolicLinkObjectType.unknown_size_or_object_ = oddobject_offset;
+  block->ObSymbolicLinkObjectType.delete_proc =
+      kernel_trampoline_group_.NewLongtermTrampoline(DeleteSymlink);
+
+#define offsetof32(s, m) static_cast<uint32_t>(offsetof(s, m))
+
+  host_object_type_enum_to_guest_object_type_ptr_ = {
+      {XObject::Type::Event,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, ExEventObjectType)},
+      {XObject::Type::Semaphore,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, ExSemaphoreObjectType)},
+      {XObject::Type::Thread,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, ExThreadObjectType)},
+      {XObject::Type::File,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, IoFileObjectType)},
+      {XObject::Type::Mutant,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, ExMutantObjectType)},
+      {XObject::Type::Device,
+       kernel_guest_globals_ +
+           offsetof32(KernelGuestGlobals, IoDeviceObjectType)}};
+  xboxkrnl::xeKeSetEvent(&block->UsbdBootEnumerationDoneEvent, 1, 0);
+}
 }  // namespace kernel
 }  // namespace xe

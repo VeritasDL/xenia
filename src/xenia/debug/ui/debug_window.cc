@@ -260,7 +260,6 @@ void DebugWindow::DrawFrame(ImGuiIO& io) {
   ImGui::PopStyleVar();
 
   if (cvars::imgui_debug) {
-    ImGui::ShowDemoWindow();
     ImGui::ShowMetricsWindow();
   }
 }
@@ -303,11 +302,26 @@ void DebugWindow::DrawToolbar() {
     if (thread_info == state_.thread_info) {
       current_thread_index = i;
     }
-    if (thread_info->state != cpu::ThreadDebugInfo::State::kZombie) {
-      thread_combo.Append(thread_info->thread->thread_name());
-    } else {
-      thread_combo.Append("(zombie)");
+
+    // Threads can be briefly invalid once destroyed and before a cache update.
+    // This ensures we are accessing threads that are still valid.
+    switch (thread_info->state) {
+      case cpu::ThreadDebugInfo::State::kAlive:
+      case cpu::ThreadDebugInfo::State::kExited:
+      case cpu::ThreadDebugInfo::State::kWaiting:
+        if (thread_info->thread_handle == NULL || thread_info->thread == NULL) {
+          thread_combo.Append("(invalid)");
+        } else {
+          thread_combo.Append(thread_info->thread->thread_name());
+        }
+        break;
+      case cpu::ThreadDebugInfo::State::kZombie:
+        thread_combo.Append("(zombie)");
+        break;
+      default:
+        thread_combo.Append("(invalid)");
     }
+
     thread_combo.Append('\0');
     ++i;
   }
@@ -652,7 +666,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, uint32_t* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -692,7 +706,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, uint64_t* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -732,7 +746,7 @@ bool DebugWindow::DrawRegisterTextBox(int id, double* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
     auto src_value = xe::string_util::to_hex_string(*value);
     std::strcpy(buffer, src_value.c_str());
@@ -771,7 +785,7 @@ bool DebugWindow::DrawRegisterTextBoxes(int id, float* value) {
       ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank;
   if (state_.register_input_hex) {
     input_flags |= ImGuiInputTextFlags_CharsHexadecimal |
-                   ImGuiInputTextFlags_AlwaysInsertMode |
+                   ImGuiInputTextFlags_AlwaysOverwrite |
                    ImGuiInputTextFlags_NoHorizontalScroll;
   } else {
     input_flags |=
@@ -1164,7 +1178,7 @@ void DebugWindow::DrawBreakpointsPane() {
     ImGuiInputTextFlags input_flags = ImGuiInputTextFlags_CharsUppercase |
                                       ImGuiInputTextFlags_CharsNoBlank |
                                       ImGuiInputTextFlags_CharsHexadecimal |
-                                      ImGuiInputTextFlags_AlwaysInsertMode |
+                                      ImGuiInputTextFlags_AlwaysOverwrite |
                                       ImGuiInputTextFlags_NoHorizontalScroll |
                                       ImGuiInputTextFlags_EnterReturnsTrue;
     ImGui::PushItemWidth(50);
@@ -1256,7 +1270,7 @@ void DebugWindow::DrawBreakpointsPane() {
         continue;
       }
       auto export_entry = all_exports[call_rankings[i].first];
-      if (export_entry->type != cpu::Export::Type::kFunction ||
+      if (export_entry->get_type() != cpu::Export::Type::kFunction ||
           !export_entry->is_implemented()) {
         continue;
       }
@@ -1562,6 +1576,8 @@ void DebugWindow::OnDetached() {
   }
 }
 
+void DebugWindow::OnUnhandledException(Exception* ex) {}
+
 void DebugWindow::OnExecutionPaused() {
   UpdateCache();
   Focus();
@@ -1589,6 +1605,8 @@ void DebugWindow::OnBreakpointHit(Breakpoint* breakpoint,
   SelectThreadStackFrame(thread_info, 0, true);
   Focus();
 }
+
+void DebugWindow::OnDebugPrint(const std::string_view message) {}
 
 void DebugWindow::Focus() const {
   app_context_.CallInUIThread([this]() { window_->Focus(); });

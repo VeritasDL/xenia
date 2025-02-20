@@ -36,7 +36,7 @@ class Win32Socket : public Socket {
   Win32Socket() = default;
   ~Win32Socket() override { Close(); }
 
-  bool Connect(std::string hostname, uint16_t port) {
+  bool Connect(std::string& hostname, uint16_t port) {
     addrinfo hints = {0};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -111,6 +111,15 @@ class Win32Socket : public Socket {
   bool is_connected() override {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     return socket_ != INVALID_SOCKET;
+  }
+
+  void set_nonblocking(bool nonblocking) override {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (socket_ == INVALID_SOCKET) {
+      return;
+    }
+    u_long val = nonblocking ? 1 : 0;
+    ioctlsocket(socket_, FIONBIO, &val);
   }
 
   void Close() override {

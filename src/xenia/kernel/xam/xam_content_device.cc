@@ -59,8 +59,22 @@ const DummyDeviceInfo* GetDummyDeviceInfo(uint32_t device_id) {
   return it == end ? nullptr : *it;
 }
 
+std::vector<const DummyDeviceInfo*> ListStorageDevices(bool include_readonly) {
+  // FIXME: Should probably check content flags here instead.
+  std::vector<const DummyDeviceInfo*> devices;
+
+  for (const auto& device_info : dummy_device_infos_) {
+    if (!include_readonly && device_info->device_type == DeviceType::ODD) {
+      continue;
+    }
+    devices.emplace_back(device_info);
+  }
+
+  return devices;
+}
+
 dword_result_t XamContentGetDeviceName_entry(dword_t device_id,
-                                             lpu16string_t name_buffer,
+                                             dword_t name_buffer_ptr,
                                              dword_t name_capacity) {
   auto device_info = GetDummyDeviceInfo(device_id);
   if (device_info == nullptr) {
@@ -70,6 +84,10 @@ dword_result_t XamContentGetDeviceName_entry(dword_t device_id,
   if (name_capacity < name.size() + 1) {
     return X_ERROR_INSUFFICIENT_BUFFER;
   }
+
+  char16_t* name_buffer =
+      kernel_memory()->TranslateVirtual<char16_t*>(name_buffer_ptr);
+
   xe::string_util::copy_and_swap_truncating(name_buffer, name, name_capacity);
   return X_ERROR_SUCCESS;
 }
@@ -141,7 +159,7 @@ dword_result_t XamContentCreateDeviceEnumerator_entry(dword_t content_type,
 
   auto e = make_object<XStaticEnumerator<X_CONTENT_DEVICE_DATA>>(kernel_state(),
                                                                  max_count);
-  auto result = e->Initialize(0xFE, 0xFE, 0x2000A, 0x20009, 0);
+  auto result = e->Initialize(XUserIndexNone, 0xFE, 0x2000A, 0x20009, 0);
   if (XFAILED(result)) {
     return result;
   }

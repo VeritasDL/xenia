@@ -13,6 +13,7 @@
 #include <string>
 
 #include "xenia/base/logging.h"
+#include "xenia/cpu/processor.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -824,7 +825,7 @@ class WideCountFormatData : public FormatData {
   int32_t count_;
 };
 
-SHIM_CALL DbgPrint_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL DbgPrint_entry(PPCContext* ppc_context) {
   uint32_t format_ptr = SHIM_GET_ARG_32(0);
   if (!format_ptr) {
     SHIM_SET_RETURN_32(X_STATUS_INVALID_PARAMETER);
@@ -850,11 +851,15 @@ SHIM_CALL DbgPrint_entry(PPCContext* ppc_context, KernelState* kernel_state) {
 
   XELOGI("(DbgPrint) {}", str);
 
+  if (cpu::DebugListener* listener = ppc_context->processor->debug_listener()) {
+    listener->OnDebugPrint(str);
+  }
+
   SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
 }
 
 // https://msdn.microsoft.com/en-us/library/2ts7cx93.aspx
-SHIM_CALL _snprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL _snprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   int32_t buffer_count = SHIM_GET_ARG_32(1);
   uint32_t format_ptr = SHIM_GET_ARG_32(2);
@@ -894,7 +899,7 @@ SHIM_CALL _snprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
 }
 
 // https://msdn.microsoft.com/en-us/library/ybk95axf.aspx
-SHIM_CALL sprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL sprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
 
@@ -925,7 +930,7 @@ SHIM_CALL sprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
 }
 
 // https://msdn.microsoft.com/en-us/library/2ts7cx93.aspx
-SHIM_CALL _snwprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL _snwprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   int32_t buffer_count = SHIM_GET_ARG_32(1);
   uint32_t format_ptr = SHIM_GET_ARG_32(2);
@@ -966,7 +971,7 @@ SHIM_CALL _snwprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
 }
 
 // https://msdn.microsoft.com/en-us/library/ybk95axf.aspx
-SHIM_CALL swprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL swprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
 
@@ -998,7 +1003,7 @@ SHIM_CALL swprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
 }
 
 // https://msdn.microsoft.com/en-us/library/1kt27hek.aspx
-SHIM_CALL _vsnprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL _vsnprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   int32_t buffer_count = SHIM_GET_ARG_32(1);
   uint32_t format_ptr = SHIM_GET_ARG_32(2);
@@ -1087,7 +1092,7 @@ SHIM_CALL _vsnwprintf_entry(PPCContext* ppc_context,
 }
 
 // https://msdn.microsoft.com/en-us/library/28d5ce15.aspx
-SHIM_CALL vsprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL vsprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
   uint32_t arg_ptr = SHIM_GET_ARG_32(2);
@@ -1147,7 +1152,7 @@ SHIM_CALL _vscwprintf_entry(PPCContext* ppc_context,
 }
 
 // https://msdn.microsoft.com/en-us/library/28d5ce15.aspx
-SHIM_CALL vswprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
+SHIM_CALL vswprintf_entry(PPCContext* ppc_context) {
   uint32_t buffer_ptr = SHIM_GET_ARG_32(0);
   uint32_t format_ptr = SHIM_GET_ARG_32(1);
   uint32_t arg_ptr = SHIM_GET_ARG_32(2);
@@ -1179,7 +1184,7 @@ SHIM_CALL vswprintf_entry(PPCContext* ppc_context, KernelState* kernel_state) {
   }
   SHIM_SET_RETURN_32(count);
 }
-
+#if 1
 void RegisterStringExports(xe::cpu::ExportResolver* export_resolver,
                            KernelState* state) {
   SHIM_SET_MAPPING("xboxkrnl.exe", DbgPrint, state);
@@ -1193,7 +1198,7 @@ void RegisterStringExports(xe::cpu::ExportResolver* export_resolver,
   SHIM_SET_MAPPING("xboxkrnl.exe", vswprintf, state);
   SHIM_SET_MAPPING("xboxkrnl.exe", _vsnwprintf, state);
 }
-
+#endif
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

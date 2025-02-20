@@ -10,9 +10,10 @@
 #ifndef XENIA_HID_INPUT_SYSTEM_H_
 #define XENIA_HID_INPUT_SYSTEM_H_
 
+#include <bitset>
 #include <memory>
 #include <vector>
-
+#include "xenia/base/mutex.h"
 #include "xenia/hid/input.h"
 #include "xenia/hid/input_driver.h"
 #include "xenia/xbox.h"
@@ -44,10 +45,39 @@ class InputSystem {
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke);
 
+  bool GetVibrationCvar();
+
+  void ToggleVibration();
+
+  const std::bitset<XUserMaxUserCount> GetConnectedSlots() const {
+    return connected_slots;
+  }
+
+  uint32_t GetLastUsedSlot() const { return last_used_slot; }
+
+  std::unique_lock<xe_unlikely_mutex> lock();
+
  private:
+  typedef std::pair<uint16_t, uint16_t> joystick_value;
+
+  const std::string controller_slot_state_change_message[2] = {
+      "Controller disconnected from slot {}.",
+      "New controller connected to slot {}."};
+
+  void UpdateUsedSlot(InputDriver* driver, uint8_t slot, bool connected);
+  void AdjustDeadzoneLevels(const uint8_t slot, X_INPUT_GAMEPAD* gamepad);
+  X_INPUT_VIBRATION ModifyVibrationLevel(X_INPUT_VIBRATION* vibration);
+
   xe::ui::Window* window_ = nullptr;
 
   std::vector<std::unique_ptr<InputDriver>> drivers_;
+
+  std::bitset<XUserMaxUserCount> connected_slots = {};
+  std::array<std::pair<joystick_value, joystick_value>, XUserMaxUserCount>
+      controllers_max_joystick_value = {};
+  uint32_t last_used_slot = 0;
+
+  xe_unlikely_mutex lock_;
 };
 
 }  // namespace hid

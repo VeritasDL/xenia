@@ -15,6 +15,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/string.h"
 #include "xenia/vfs/device.h"
+#include "xenia/vfs/devices/host_path_device.h"
 #include "xenia/vfs/devices/host_path_file.h"
 
 namespace xe {
@@ -22,8 +23,9 @@ namespace vfs {
 
 HostPathEntry::HostPathEntry(Device* device, Entry* parent,
                              const std::string_view path,
+                             const std::string_view name,
                              const std::filesystem::path& host_path)
-    : Entry(device, parent, path), host_path_(host_path) {}
+    : Entry(device, parent, path, name), host_path_(host_path) {}
 
 HostPathEntry::~HostPathEntry() = default;
 
@@ -32,7 +34,8 @@ HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
                                      xe::filesystem::FileInfo file_info) {
   auto path = xe::utf8::join_guest_paths(parent->path(),
                                          xe::path_to_utf8(file_info.name));
-  auto entry = new HostPathEntry(device, parent, path, full_path);
+  auto entry = new HostPathEntry(device, parent, path,
+                                 xe::path_to_utf8(file_info.name), full_path);
 
   entry->create_timestamp_ = file_info.create_timestamp;
   entry->access_timestamp_ = file_info.access_timestamp;
@@ -103,10 +106,20 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
     auto removed = std::filesystem::remove_all(full_path, ec);
     return removed >= 1 && removed != static_cast<std::uintmax_t>(-1);
   } else {
-    // Delete file.
+    // Delete file only if it exists.
     return !std::filesystem::is_directory(full_path) &&
-           std::filesystem::remove(full_path, ec);
+           (!std::filesystem::exists(full_path) ||
+            std::filesystem::remove(full_path, ec));
   }
+}
+
+void HostPathEntry::RenameEntryInternal(const std::filesystem::path file_path) {
+  const std::string new_host_path_ = xe::utf8::join_paths(
+      xe::path_to_utf8(((HostPathDevice*)device_)->host_path()),
+      xe::path_to_utf8(file_path));
+
+  std::filesystem::rename(host_path_, new_host_path_);
+  host_path_ = new_host_path_;
 }
 
 void HostPathEntry::update() {
@@ -119,6 +132,48 @@ void HostPathEntry::update() {
     allocation_size_ =
         xe::round_up(file_info.total_size, device()->bytes_per_sector());
   }
+}
+
+bool HostPathEntry::SetAttributes(uint64_t attributes) {
+  if (device_->is_read_only()) {
+    return false;
+  }
+  return xe::filesystem::SetAttributes(host_path_, attributes);
+}
+
+bool HostPathEntry::SetCreateTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW(
+        "{} - Tried to change read-only creation timestamp for file: {} to: {}",
+        __FUNCTION__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change creation timestamp for file: {} to: {}",
+         __FUNCTION__, name_, timestamp);
+  return true;
+}
+
+bool HostPathEntry::SetAccessTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW(
+        "{} - Tried to change read-only access timestamp for file: {} to: {}",
+        __FUNCTION__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change access timestamp for file: {} to: {}",
+         __FUNCTION__, name_, timestamp);
+  return true;
+}
+
+bool HostPathEntry::SetWriteTimestamp(uint64_t timestamp) {
+  if (device_->is_read_only()) {
+    XELOGW("{} - Tried to change read-only write timestamp for file: {} to: {}",
+           __FUNCTION__, name_, timestamp);
+    return false;
+  }
+  XELOGI("{} - Tried to change write timestamp for file: {} to: {}",
+         __FUNCTION__, name_, timestamp);
+  return true;
 }
 
 }  // namespace vfs

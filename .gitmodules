@@ -1,6 +1,6 @@
 [submodule "third_party/xbyak"]
 	path = third_party/xbyak
-	url = https://github.com/xenia-project/xbyak.git
+	url = https://github.com/herumi/xbyak.git
 [submodule "third_party/imgui"]
 	path = third_party/imgui
 	url = https://github.com/ocornut/imgui.git
@@ -30,10 +30,10 @@
 	url = https://github.com/openluopworld/aes_128.git
 [submodule "third_party/capstone"]
 	path = third_party/capstone
-	url = https://github.com/xenia-project/capstone.git
-[submodule "third_party/cpptoml"]
-	path = third_party/cpptoml
-	url = https://github.com/skystrife/cpptoml.git
+	url = https://github.com/capstone-engine/capstone.git
+[submodule "third_party/tomlplusplus"]
+	path = third_party/tomlplusplus
+	url = https://github.com/marzer/tomlplusplus.git
 [submodule "third_party/cxxopts"]
 	path = third_party/cxxopts
 	url = https://github.com/jarro2783/cxxopts.git
@@ -48,7 +48,7 @@
 	url = https://github.com/fmtlib/fmt.git
 [submodule "third_party/disruptorplus"]
 	path = third_party/disruptorplus
-	url = https://github.com/xenia-project/disruptorplus.git
+	url = https://github.com/xenia-canary/disruptorplus.git
 [submodule "third_party/DirectXShaderCompiler"]
 	path = third_party/DirectXShaderCompiler
 	url = https://github.com/microsoft/DirectXShaderCompiler.git
@@ -63,7 +63,7 @@
 	url = https://github.com/Cyan4973/xxHash.git
 [submodule "third_party/FFmpeg"]
 	path = third_party/FFmpeg
-	url = https://github.com/xenia-project/FFmpeg.git
+	url = https://github.com/xenia-canary/FFmpeg_radixsplit.git
 [submodule "third_party/premake-androidndk"]
 	path = third_party/premake-androidndk
 	url = https://github.com/Triang3l/premake-androidndk.git
@@ -85,3 +85,21 @@
 [submodule "third_party/VulkanMemoryAllocator"]
 	path = third_party/VulkanMemoryAllocator
 	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+[submodule "third_party/zstd"]
+	path = third_party/zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "third_party/zarchive"]
+	path = third_party/zarchive
+	url = https://github.com/exzap/ZArchive.git
+[submodule "third_party/tabulate"]
+	path = third_party/tabulate
+	url = https://github.com/p-ranav/tabulate.git
+[submodule "third_party/rapidcsv"]
+	path = third_party/rapidcsv
+	url = https://github.com/d99kris/rapidcsv.git
+[submodule "third_party/zlib"]
+	path = third_party/zlib
+	url = https://github.com/madler/zlib.git
+[submodule "third_party/pugixml"]
+	path = third_party/pugixml
+	url = https://github.com/zeux/pugixml.git

@@ -43,6 +43,7 @@ DEFINE_bool(
     "Allow stencil reference output usage on Direct3D 12 on Intel GPUs - not "
     "working on UHD Graphics 630 as of March 2021 (driver 27.20.0100.8336).",
     "GPU");
+DEFINE_bool(no_discard_stencil_in_transfer_pipelines, false, "bleh", "GPU");
 // TODO(Triang3l): Make ROV the default when it's optimized better (for
 // instance, using static shader modifications to pass render target
 // parameters).
@@ -2940,7 +2941,7 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
   // r0.xy = destination pixel XY index within the 32bpp tile
   // r0.zw = 32bpp tile XY index
   a.OpUDiv(dxbc::Dest::R(0, 0b1100), dxbc::Dest::R(0, 0b0011),
-           dxbc::Src::R(0, 0b01000100),
+           dxbc::Src::R(0, dxbc::Src::kXYXY),
            dxbc::Src::LU(dest_tile_width_pixels, dest_tile_height_pixels,
                          dest_tile_width_pixels, dest_tile_height_pixels));
 
@@ -4189,12 +4190,14 @@ D3D12RenderTargetCache::GetOrCreateTransferPipelines(TransferShaderKey key) {
         break;
       case TransferOutput::kStencilBit:
         // Discard the sample if the needed stencil bit is not set.
-        assert_true(cbuffer_index_stencil_mask != UINT32_MAX);
-        a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
-                dxbc::Src::CB(cbuffer_index_stencil_mask,
-                              kTransferCBVRegisterStencilMask, 0,
-                              dxbc::Src::kXXXX));
-        a.OpDiscard(false, dxbc::Src::R(0, dxbc::Src::kXXXX));
+        if (!cvars::no_discard_stencil_in_transfer_pipelines) {
+          assert_true(cbuffer_index_stencil_mask != UINT32_MAX);
+          a.OpAnd(dxbc::Dest::R(0, 0b0001), dxbc::Src::R(1, dxbc::Src::kXXXX),
+                  dxbc::Src::CB(cbuffer_index_stencil_mask,
+                                kTransferCBVRegisterStencilMask, 0,
+                                dxbc::Src::kXXXX));
+          a.OpDiscard(false, dxbc::Src::R(0, dxbc::Src::kXXXX));
+        }
         break;
     }
   }
@@ -4799,18 +4802,16 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
     if (!current_transfers.empty()) {
       are_current_command_list_render_targets_valid_ = false;
       if (dest_rt_key.is_depth) {
-        command_list.D3DOMSetRenderTargets(
-            0, nullptr, FALSE, &dest_d3d12_rt.descriptor_draw().GetHandle());
+        auto handle = dest_d3d12_rt.descriptor_draw().GetHandle();
+        command_list.D3DOMSetRenderTargets(0, nullptr, FALSE, &handle);
         if (!use_stencil_reference_output_) {
           command_processor_.SetStencilReference(UINT8_MAX);
         }
       } else {
-        command_list.D3DOMSetRenderTargets(
-            1,
-            &(dest_d3d12_rt.descriptor_load_separate().IsValid()
-                  ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
-                  : dest_d3d12_rt.descriptor_draw().GetHandle()),
-            FALSE, nullptr);
+        auto handle = dest_d3d12_rt.descriptor_load_separate().IsValid()
+                          ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
+                          : dest_d3d12_rt.descriptor_draw().GetHandle();
+        command_list.D3DOMSetRenderTargets(1, &handle, FALSE, nullptr);
       }
 
       uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
@@ -5425,12 +5426,12 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
             dest_d3d12_rt.SetResourceState(D3D12_RESOURCE_STATE_RENDER_TARGET),
             D3D12_RESOURCE_STATE_RENDER_TARGET);
         if (clear_via_drawing) {
-          command_list.D3DOMSetRenderTargets(
-              1,
-              &(dest_d3d12_rt.descriptor_load_separate().IsValid()
-                    ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
-                    : dest_d3d12_rt.descriptor_draw().GetHandle()),
-              FALSE, nullptr);
+          auto handle =
+              (dest_d3d12_rt.descriptor_load_separate().IsValid()
+                   ? dest_d3d12_rt.descriptor_load_separate().GetHandle()
+                   : dest_d3d12_rt.descriptor_draw().GetHandle());
+
+          command_list.D3DOMSetRenderTargets(1, &handle, FALSE, nullptr);
           are_current_command_list_render_targets_valid_ = true;
           D3D12_VIEWPORT clear_viewport;
           clear_viewport.TopLeftX = float(clear_rect.left);
@@ -5494,11 +5495,19 @@ void D3D12RenderTargetCache::SetCommandListRenderTargets(
   }
 
   // Bind the render targets.
-  if (are_current_command_list_render_targets_valid_ &&
-      std::memcmp(current_command_list_render_targets_,
-                  depth_and_color_render_targets,
-                  sizeof(current_command_list_render_targets_))) {
-    are_current_command_list_render_targets_valid_ = false;
+  if (are_current_command_list_render_targets_valid_) {
+    // chrispy: the small memcmp doesnt get optimized by msvc
+
+    for (unsigned i = 0;
+         i < sizeof(current_command_list_render_targets_) /
+                 sizeof(current_command_list_render_targets_[0]);
+         ++i) {
+      if ((const void*)current_command_list_render_targets_[i] !=
+          (const void*)depth_and_color_render_targets[i]) {
+        are_current_command_list_render_targets_valid_ = false;
+        break;
+      }
+    }
   }
   uint32_t render_targets_are_srgb;
   if (gamma_render_target_as_srgb_) {

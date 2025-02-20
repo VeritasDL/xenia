@@ -91,11 +91,22 @@ dword_result_t NtQueryInformationFile_entry(
       out_length = sizeof(*info);
       break;
     }
+    case XFileAlignmentInformation: {
+      // Requested by XMountUtilityDrive XAM-task
+      auto info = info_ptr.as<uint32_t*>();
+      *info = 0;  // FILE_BYTE_ALIGNMENT?
+      out_length = sizeof(*info);
+      break;
+    }
     case XFileSectorInformation: {
-      // TODO(benvanik): return sector this file's on.
-      XELOGE("NtQueryInformationFile(XFileSectorInformation) unimplemented");
-      status = X_STATUS_INVALID_PARAMETER;
-      out_length = 0;
+      // SW that uses this seems to use the output as a way of uniquely
+      // identifying a file for sorting/lookup so we can just give it an
+      // arbitrary 4 byte integer most of the time
+      XELOGW("Stub XFileSectorInformation!");
+      auto info = info_ptr.as<uint32_t*>();
+      size_t fname_hash = xe::memory::hash_combine(82589933LL, file->path());
+      *info = static_cast<uint32_t>(fname_hash ^ (fname_hash >> 32));
+      out_length = sizeof(uint32_t);
       break;
     }
     case XFileXctdCompressionInformation: {
@@ -126,13 +137,6 @@ dword_result_t NtQueryInformationFile_entry(
       out_length = sizeof(*info);
       break;
     }
-    case XFileAlignmentInformation: {
-      // Requested by XMountUtilityDrive XAM-task
-      auto info = info_ptr.as<uint32_t*>();
-      *info = 0;  // FILE_BYTE_ALIGNMENT?
-      out_length = sizeof(*info);
-      break;
-    }
     default: {
       // Unsupported, for now.
       assert_always();
@@ -153,6 +157,8 @@ DECLARE_XBOXKRNL_EXPORT1(NtQueryInformationFile, kFileSystem, kImplemented);
 
 uint32_t GetSetFileInfoMinimumLength(uint32_t info_class) {
   switch (info_class) {
+    case XFileRenameInformation:
+      return sizeof(X_FILE_RENAME_INFORMATION);
     case XFileDispositionInformation:
       return sizeof(X_FILE_DISPOSITION_INFORMATION);
     case XFilePositionInformation:
@@ -167,7 +173,6 @@ uint32_t GetSetFileInfoMinimumLength(uint32_t info_class) {
     case XFileEndOfFileInformation:
     case XFileMountPartitionInformation:
       return 8;
-    case XFileRenameInformation:
     case XFileLinkInformation:
       return 16;
     case XFileBasicInformation:
@@ -200,13 +205,57 @@ dword_result_t NtSetInformationFile_entry(
   uint32_t out_length;
 
   switch (info_class) {
+    case XFileBasicInformation: {
+      auto info = info_ptr.as<X_FILE_BASIC_INFORMATION*>();
+
+      bool basic_result = true;
+      if (info->creation_time) {
+        basic_result &= file->entry()->SetCreateTimestamp(info->creation_time);
+      }
+
+      if (info->last_access_time) {
+        basic_result &=
+            file->entry()->SetAccessTimestamp(info->last_access_time);
+      }
+
+      if (info->last_write_time) {
+        basic_result &= file->entry()->SetWriteTimestamp(info->last_write_time);
+      }
+
+      basic_result &= file->entry()->SetAttributes(info->attributes);
+      if (!basic_result) {
+        result = X_STATUS_UNSUCCESSFUL;
+      }
+
+      out_length = sizeof(*info);
+      break;
+    }
+    case XFileRenameInformation: {
+      auto info = info_ptr.as<X_FILE_RENAME_INFORMATION*>();
+      // Compute path, possibly attrs relative.
+      std::filesystem::path target_path =
+          util::TranslateAnsiString(kernel_memory(), &info->ansi_string);
+
+      // Place IsValidPath in path from where it can be accessed everywhere
+      if (!IsValidPath(target_path.string(), false)) {
+        return X_STATUS_OBJECT_NAME_INVALID;
+      }
+
+      if (!target_path.has_filename()) {
+        return X_STATUS_INVALID_PARAMETER;
+      }
+
+      file->Rename(target_path);
+      out_length = sizeof(*info);
+      break;
+    }
     case XFileDispositionInformation: {
-      // Used to set deletion flag. Which we don't support. Probably?
       auto info = info_ptr.as<X_FILE_DISPOSITION_INFORMATION*>();
       bool delete_on_close = info->delete_file ? true : false;
+      file->entry()->SetForDeletion(static_cast<bool>(info->delete_file));
       out_length = 0;
-      XELOGW("NtSetInformationFile ignoring delete on close: {}",
-             delete_on_close);
+      XELOGW("NtSetInformationFile set deleting flag for {} on close to: {}",
+             file->name(), delete_on_close);
       break;
     }
     case XFilePositionInformation: {
@@ -338,9 +387,16 @@ dword_result_t NtQueryVolumeInformationFile_entry(
       }
       break;
     }
-    case XFileFsDeviceInformation:
+    case XFileFsDeviceInformation: {
+      auto info = info_ptr.as<X_FILE_FS_DEVICE_INFORMATION*>();
+      auto file_device = file->device();
+      XELOGW("Stub XFileFsDeviceInformation!");
+      info->device_type = FILE_DEVICE_UNKNOWN;  // 415608D8 checks for 0x46;
+      info->characteristics = 0;
+      out_length = sizeof(X_FILE_FS_DEVICE_INFORMATION);
+      break;
+    }
     default: {
-      // Unsupported, for now.
       assert_always();
       out_length = 0;
       break;
