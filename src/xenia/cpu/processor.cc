@@ -674,10 +674,14 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
+  int gdbaddrtest = 2;
+  if (cvars::gdbport > 0) {
+	  addrtest = 0;
+  }  
 #if XE_ARCH_AMD64
-  ex->set_resume_pc(thread_info->host_context.rip);
+  ex->set_resume_pc(thread_info->host_context.rip + gdbaddrtest);
 #elif XE_ARCH_ARM64
-  ex->set_resume_pc(thread_info->host_context.pc);
+  ex->set_resume_pc(thread_info->host_context.pc + gdbaddrtest);
 #else
 #error Instruction pointer not specified for the target CPU architecture.
 #endif  // XE_ARCH
