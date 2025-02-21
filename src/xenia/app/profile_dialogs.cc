@@ -57,7 +57,7 @@ void CreateProfileDialog::OnDraw(ImGuiIO& io) {
 
   ImGui::BeginDisabled(!valid);
   if (ImGui::Button("Create")) {
-    bool autologin = (profile_manager->GetProfilesCount() == 0);
+    bool autologin = (profile_manager->GetAccountCount() == 0);
     if (profile_manager->CreateProfile(gamertag_string, autologin,
                                        migration_) &&
         migration_) {
@@ -89,7 +89,7 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
                              ->xam_state()
                              ->profile_manager();
 
-  if (profile_manager->GetProfilesCount()) {
+  if (profile_manager->GetAccountCount()) {
     delete this;
     return;
   }
@@ -97,7 +97,6 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
   const auto window_position =
       ImVec2(GetIO().DisplaySize.x * 0.35f, GetIO().DisplaySize.y * 0.4f);
 
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
   ImGui::SetNextWindowPos(window_position, ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowBgAlpha(1.0f);
 
@@ -110,8 +109,6 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
     delete this;
     return;
   }
-
-  ImGui::PopStyleVar();
 
   const std::string message =
       "There is no profile available! You will not be able to save without "
@@ -167,9 +164,8 @@ void ProfileConfigDialog::OnDraw(ImGuiIO& io) {
     return;
   }
 
-  auto profiles = profile_manager->GetProfiles();
+  auto profiles = profile_manager->GetAccounts();
 
-  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
   ImGui::SetNextWindowPos(ImVec2(40, 40), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowBgAlpha(0.8f);
 
@@ -181,8 +177,6 @@ void ProfileConfigDialog::OnDraw(ImGuiIO& io) {
     ImGui::End();
     return;
   }
-
-  ImGui::PopStyleVar();
 
   if (profiles->empty()) {
     ImGui::TextUnformatted("No profiles found!");
