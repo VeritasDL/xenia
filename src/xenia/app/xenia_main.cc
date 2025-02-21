@@ -623,6 +623,7 @@ void EmulatorApp::EmulatorThread() {
             // If failed to enqueue the UI thread call, this will just be null.
           return debug_window_.get();
         });
+    }
   }
 
   emulator_->on_launch.AddListener([&](auto title_id, const auto& game_title) {
