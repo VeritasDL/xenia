@@ -854,7 +854,8 @@ SHIM_CALL DbgPrint_entry(PPCContext* ppc_context) {
   if (cpu::DebugListener* listener = ppc_context->processor->debug_listener()) {
     listener->OnDebugPrint(str);
   }
-            
+  
+  
   SHIM_SET_RETURN_32(X_STATUS_SUCCESS);
 }
 

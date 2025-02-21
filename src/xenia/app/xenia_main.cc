@@ -101,6 +101,10 @@ DEFINE_transient_bool(portable, true,
                       "General");
 
 DECLARE_bool(debug);
+DEFINE_int32(
+    gdbport, 0,
+    "Port for GDBStub debugger to listen on, requires --debug (0 = disable)",
+    "General");
 
 DEFINE_int32(gdbport, 0, "Port for GDBStub debugger to listen on, requires --debug (0 = disable)", "General");
 
@@ -258,7 +262,6 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   // Created on demand, used by the emulator.
   std::unique_ptr<xe::debug::ui::DebugWindow> debug_window_;
   std::unique_ptr<xe::debug::gdb::GDBStub> debug_gdbstub_;
-
 
   // Refreshing the emulator - placed after its dependencies.
   std::atomic<bool> emulator_thread_quit_requested_;
@@ -594,7 +597,7 @@ void EmulatorApp::EmulatorThread() {
     }
   }
 
-  // Set a debug handler.
+// Set a debug handler.
   // This will respond to debugging requests so we can open the debug UI.
   if (cvars::debug) {
     if (cvars::gdbport > 0) {
@@ -621,8 +624,8 @@ void EmulatorApp::EmulatorThread() {
                   &debug_window_closed_listener_);
             });
             // If failed to enqueue the UI thread call, this will just be null.
-          return debug_window_.get();
-        });
+            return debug_window_.get();
+          });
     }
   }
 

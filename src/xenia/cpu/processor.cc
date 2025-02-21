@@ -641,10 +641,8 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
   for (size_t i = 0; i < thread_info->frames.size(); ++i) {
     auto& frame = thread_info->frames[i];
     for (auto scan_breakpoint : breakpoints_) {
-      if ((scan_breakpoint->address_type() == Breakpoint::AddressType::kGuest &&
-           scan_breakpoint->guest_address() == frame.guest_pc) ||
-          (scan_breakpoint->address_type() == Breakpoint::AddressType::kHost &&
-           scan_breakpoint->host_address() == frame.host_pc) ||
+      if ((scan_breakpoint->address_type() == Breakpoint::AddressType::kGuest && scan_breakpoint->guest_address() == frame.guest_pc) || 
+          (scan_breakpoint->address_type() == Breakpoint::AddressType::kHost && scan_breakpoint->host_address() == frame.host_pc) || 
           scan_breakpoint->ContainsHostAddress(frame.host_pc)) {
         breakpoint = scan_breakpoint;
         break;
@@ -671,14 +669,13 @@ bool Processor::OnThreadBreakpointHit(Exception* ex) {
   }
 
   ResumeAllThreads();
-  thread_info->thread->thread()->Suspend();
 
   // Apply thread context changes.
   // TODO(benvanik): apply to all threads?
-int addrtest = 2;
-if (cvars::gdbport > 0) {
- addrtest = 0;
-}
+  int addrtest = 2;
+  if (cvars::gdbport > 0) {
+    addrtest = 0;
+  }
 #if XE_ARCH_AMD64
   ex->set_resume_pc(thread_info->host_context.rip + addrtest);
 #elif XE_ARCH_ARM64
@@ -980,7 +977,7 @@ void Processor::StepGuestInstruction(uint32_t thread_id) {
   // Add to front of breakpoints map, so this should get evaluated first
   breakpoints_.insert(breakpoints_.begin(), thread_info->step_breakpoint.get());
   thread_info->step_breakpoint->Resume();
-
+  
   // ResumeAllBreakpoints();
   ResumeThread(thread_id);
 }

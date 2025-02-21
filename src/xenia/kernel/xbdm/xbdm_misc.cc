@@ -78,11 +78,9 @@ void DmSendNotificationString_entry(lpstring_t message) {
     listener->OnDebugPrint(message.value());
   }
 }
-DECLARE_XBDM_EXPORT1(DmRegisterCommandProcessor, kDebug, kStub);
+DECLARE_XBDM_EXPORT1(DmSendNotificationString, kDebug, kStub);
 
-dword_result_t DmRegisterCommandProcessorEx_entry(lpdword_t name_ptr,
-                                                  lpdword_t handler_fn,
-                                                  dword_t unk3) {
+dword_result_t DmRegisterCommandProcessorEx_entry(lpdword_t name_ptr, lpdword_t handler_fn, dword_t unk3) {
   // Return success to prevent some games from stalling
   return XBDM_SUCCESSFUL;
 }
